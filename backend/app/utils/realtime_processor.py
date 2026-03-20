@@ -1,17 +1,17 @@
 """
-Real-time Object Measurement Processor
-Uses MiDaS for depth estimation and YOLOv8 for object detection
-Measures 2D objects (length, breadth) and 3D objects (length, breadth, height)
+Real-time Object Measurement Processor (Lightweight Version)
+Uses OpenCV for object detection and measurement
+Works without heavy ML dependencies (no PyTorch/YOLO)
 """
 
 import cv2
 import numpy as np
 import base64
-from typing import List, Optional, Tuple, Dict, Any
-from dataclasses import dataclass, asdict
+from typing import List, Optional, Tuple
+from dataclasses import dataclass
 from enum import Enum
-import torch
 import logging
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -29,15 +29,11 @@ class MeasuredObject3D:
     object_type: ObjectType
     label: str
     confidence: float
-    # Dimensions in centimeters
     length_cm: float
     breadth_cm: float
-    height_cm: Optional[float]  # None for 2D objects
-    # Bounding box [x, y, width, height]
+    height_cm: Optional[float]
     bounding_box: Tuple[int, int, int, int]
-    # Center point
     center: Tuple[int, int]
-    # Depth value (average) in relative units
     depth_value: float
 
 
@@ -56,484 +52,322 @@ class RealtimeMeasurementResult:
 
 class RealtimeProcessor:
     """
-    Real-time processor for object measurement using depth estimation
+    Lightweight real-time processor for object measurement using OpenCV
+    No heavy ML dependencies - works on Render free tier
     """
 
-    # Default camera parameters (can be calibrated)
-    # These are approximate values for typical smartphone cameras
-    DEFAULT_FOCAL_LENGTH_MM = 4.0  # Typical smartphone focal length
-    DEFAULT_SENSOR_WIDTH_MM = 6.0  # Typical smartphone sensor width
-    DEFAULT_REFERENCE_DISTANCE_CM = 100.0  # Assumed distance for calibration
+    # Calibration: pixels to cm at reference distance
+    # Assumes phone camera at ~30cm distance from object
+    PIXELS_PER_CM = 15.0  # Approximate - can be calibrated
+    REFERENCE_DISTANCE_CM = 30.0
 
-    # Depth variance threshold to distinguish 2D from 3D
-    DEPTH_VARIANCE_THRESHOLD = 0.15
+    # Detection parameters
+    MIN_CONTOUR_AREA = 1000
+    MAX_CONTOUR_AREA = 500000
 
-    # Minimum object size (pixels) to consider
-    MIN_OBJECT_SIZE = 50
-
-    def __init__(
-        self,
-        use_gpu: bool = False,
-        model_type: str = "midas_small",
-        confidence_threshold: float = 0.5,
-    ):
-        """
-        Initialize the real-time processor
-
-        Args:
-            use_gpu: Whether to use GPU acceleration
-            model_type: MiDaS model type ("midas_small", "dpt_hybrid", "dpt_large")
-            confidence_threshold: Minimum confidence for object detection
-        """
-        self.use_gpu = use_gpu and torch.cuda.is_available()
-        self.device = torch.device("cuda" if self.use_gpu else "cpu")
+    def __init__(self, confidence_threshold: float = 0.5):
+        """Initialize the processor"""
         self.confidence_threshold = confidence_threshold
-        self.model_type = model_type
+        self._scale_factor = 1.0
+        self._models_loaded = True  # No models to load in lightweight version
+        logger.info("Lightweight RealtimeProcessor initialized (OpenCV only)")
 
-        # Models will be loaded lazily
-        self._depth_model = None
-        self._depth_transform = None
-        self._object_detector = None
-
-        # Calibration parameters
-        self.focal_length_mm = self.DEFAULT_FOCAL_LENGTH_MM
-        self.sensor_width_mm = self.DEFAULT_SENSOR_WIDTH_MM
-        self.reference_distance_cm = self.DEFAULT_REFERENCE_DISTANCE_CM
-
-        # Cache for depth scale factor
-        self._depth_scale_factor = 1.0
-
-        logger.info(
-            f"RealtimeProcessor initialized (GPU: {self.use_gpu}, Model: {model_type})"
-        )
-
-    def _load_depth_model(self):
-        """Load MiDaS depth estimation model"""
-        if self._depth_model is not None:
-            return
-
-        logger.info(f"Loading MiDaS depth model: {self.model_type}")
-
-        try:
-            # Load MiDaS model
-            if self.model_type == "midas_small":
-                self._depth_model = torch.hub.load(
-                    "intel-isl/MiDaS", "MiDaS_small", trust_repo=True
-                )
-                self._depth_transform = torch.hub.load(
-                    "intel-isl/MiDaS", "transforms", trust_repo=True
-                ).small_transform
-            elif self.model_type == "dpt_hybrid":
-                self._depth_model = torch.hub.load(
-                    "intel-isl/MiDaS", "DPT_Hybrid", trust_repo=True
-                )
-                self._depth_transform = torch.hub.load(
-                    "intel-isl/MiDaS", "transforms", trust_repo=True
-                ).dpt_transform
-            else:
-                # Default to small for speed
-                self._depth_model = torch.hub.load(
-                    "intel-isl/MiDaS", "MiDaS_small", trust_repo=True
-                )
-                self._depth_transform = torch.hub.load(
-                    "intel-isl/MiDaS", "transforms", trust_repo=True
-                ).small_transform
-
-            self._depth_model.to(self.device)
-            self._depth_model.eval()
-
-            logger.info("MiDaS depth model loaded successfully")
-
-        except Exception as e:
-            logger.error(f"Failed to load MiDaS model: {e}")
-            raise RuntimeError(f"Could not load depth model: {e}")
-
-    def _load_object_detector(self):
-        """Load YOLOv8 object detection model"""
-        if self._object_detector is not None:
-            return
-
-        logger.info("Loading YOLOv8 object detector")
-
-        try:
-            from ultralytics import YOLO
-
-            # Use YOLOv8 nano for speed, can use 's' or 'm' for better accuracy
-            self._object_detector = YOLO("yolov8n.pt")
-
-            logger.info("YOLOv8 object detector loaded successfully")
-
-        except Exception as e:
-            logger.error(f"Failed to load YOLOv8: {e}")
-            raise RuntimeError(f"Could not load object detector: {e}")
-
-    def _estimate_depth(self, image: np.ndarray) -> np.ndarray:
+    def _detect_objects_opencv(self, image: np.ndarray) -> List[dict]:
         """
-        Estimate depth map from RGB image using MiDaS
-
-        Args:
-            image: BGR image (OpenCV format)
-
-        Returns:
-            Depth map (higher values = closer)
+        Detect objects using OpenCV contour detection
         """
-        self._load_depth_model()
-
-        # Convert BGR to RGB
-        img_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-
-        # Apply transform
-        input_batch = self._depth_transform(img_rgb).to(self.device)
-
-        # Predict depth
-        with torch.no_grad():
-            depth_prediction = self._depth_model(input_batch)
-
-            # Interpolate to original size
-            depth_prediction = torch.nn.functional.interpolate(
-                depth_prediction.unsqueeze(1),
-                size=image.shape[:2],
-                mode="bicubic",
-                align_corners=False,
-            ).squeeze()
-
-        depth_map = depth_prediction.cpu().numpy()
-
-        # Normalize depth map (0-1, where 1 is closer)
-        depth_min = depth_map.min()
-        depth_max = depth_map.max()
-        if depth_max - depth_min > 0:
-            depth_map = (depth_map - depth_min) / (depth_max - depth_min)
-
-        return depth_map
-
-    def _detect_objects(self, image: np.ndarray) -> List[Dict[str, Any]]:
-        """
-        Detect objects in image using YOLOv8
-
-        Args:
-            image: BGR image
-
-        Returns:
-            List of detected objects with bounding boxes
-        """
-        self._load_object_detector()
-
-        # Run detection
-        results = self._object_detector(image, verbose=False)
-
+        height, width = image.shape[:2]
         detected_objects = []
 
-        for result in results:
-            boxes = result.boxes
-            if boxes is None:
+        # Convert to grayscale
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+
+        # Apply Gaussian blur
+        blurred = cv2.GaussianBlur(gray, (7, 7), 0)
+
+        # Edge detection
+        edges = cv2.Canny(blurred, 30, 100)
+
+        # Dilate to close gaps
+        kernel = np.ones((5, 5), np.uint8)
+        dilated = cv2.dilate(edges, kernel, iterations=2)
+
+        # Find contours
+        contours, _ = cv2.findContours(
+            dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+        )
+
+        # Filter and process contours
+        object_id = 0
+        for contour in contours:
+            area = cv2.contourArea(contour)
+
+            # Filter by area
+            if area < self.MIN_CONTOUR_AREA or area > self.MAX_CONTOUR_AREA:
                 continue
 
-            for i, box in enumerate(boxes):
-                conf = float(box.conf[0])
-                if conf < self.confidence_threshold:
-                    continue
+            # Get bounding rectangle
+            x, y, w, h = cv2.boundingRect(contour)
 
-                # Get bounding box
-                x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
-                x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
+            # Filter out very thin objects (likely edges)
+            aspect_ratio = max(w, h) / min(w, h) if min(w, h) > 0 else 100
+            if aspect_ratio > 10:
+                continue
 
-                # Get class
-                cls_id = int(box.cls[0])
-                cls_name = result.names[cls_id]
+            # Filter objects touching the edge
+            margin = 10
+            if (
+                x < margin
+                or y < margin
+                or x + w > width - margin
+                or y + h > height - margin
+            ):
+                continue
 
-                # Calculate dimensions
-                width = x2 - x1
-                height = y2 - y1
+            # Calculate confidence based on contour properties
+            perimeter = cv2.arcLength(contour, True)
+            approx = cv2.approxPolyDP(contour, 0.02 * perimeter, True)
 
-                # Filter out too small objects
-                if width < self.MIN_OBJECT_SIZE or height < self.MIN_OBJECT_SIZE:
-                    continue
+            # Solidity (area / convex hull area)
+            hull = cv2.convexHull(contour)
+            hull_area = cv2.contourArea(hull)
+            solidity = area / hull_area if hull_area > 0 else 0
 
-                detected_objects.append(
-                    {
-                        "bbox": (x1, y1, width, height),
-                        "xyxy": (x1, y1, x2, y2),
-                        "label": cls_name,
-                        "confidence": conf,
-                        "center": (x1 + width // 2, y1 + height // 2),
-                    }
-                )
+            # Higher confidence for more regular shapes
+            confidence = min(0.95, solidity * 0.8 + 0.2)
+
+            if confidence < self.confidence_threshold:
+                continue
+
+            object_id += 1
+
+            # Determine if likely 3D based on shape analysis
+            # Use moment analysis to detect depth perception cues
+            moments = cv2.moments(contour)
+            if moments["m00"] != 0:
+                cx = int(moments["m10"] / moments["m00"])
+                cy = int(moments["m01"] / moments["m00"])
+            else:
+                cx, cy = x + w // 2, y + h // 2
+
+            # Estimate 3D-ness based on shape complexity and texture variance
+            roi = gray[y : y + h, x : x + w]
+            texture_variance = np.var(roi) if roi.size > 0 else 0
+
+            # Objects with high texture variance are more likely 3D
+            is_3d = texture_variance > 1000 or len(approx) > 6
+
+            detected_objects.append(
+                {
+                    "id": object_id,
+                    "bbox": (x, y, w, h),
+                    "center": (cx, cy),
+                    "confidence": confidence,
+                    "contour": contour,
+                    "is_3d": is_3d,
+                    "texture_variance": texture_variance,
+                    "num_vertices": len(approx),
+                }
+            )
 
         return detected_objects
 
-    def _calculate_real_dimensions(
+    def _calculate_dimensions(
         self,
         bbox: Tuple[int, int, int, int],
-        depth_map: np.ndarray,
-        image_width: int,
+        is_3d: bool,
+        texture_variance: float,
         image_height: int,
-    ) -> Tuple[float, float, Optional[float], ObjectType, float]:
+    ) -> Tuple[float, float, Optional[float]]:
         """
-        Calculate real-world dimensions from bounding box and depth
-
-        Args:
-            bbox: (x, y, width, height) bounding box
-            depth_map: Normalized depth map
-            image_width: Image width in pixels
-            image_height: Image height in pixels
-
-        Returns:
-            (length_cm, breadth_cm, height_cm, object_type, avg_depth)
+        Calculate real-world dimensions from bounding box
         """
         x, y, w, h = bbox
 
-        # Ensure bounds are within image
-        x1, y1 = max(0, x), max(0, y)
-        x2, y2 = min(image_width, x + w), min(image_height, y + h)
+        # Calculate scale based on position in image
+        # Objects lower in image are usually closer
+        position_factor = 1.0 + (y / image_height) * 0.3
 
-        # Extract depth region for the object
-        depth_region = depth_map[y1:y2, x1:x2]
+        # Apply scale factor
+        scale = self.PIXELS_PER_CM * self._scale_factor * position_factor
 
-        if depth_region.size == 0:
-            return 0.0, 0.0, None, ObjectType.OBJECT_2D, 0.0
+        # Calculate length and breadth
+        length_cm = round(w / scale, 1)
+        breadth_cm = round(h / scale, 1)
 
-        # Calculate depth statistics
-        avg_depth = float(np.mean(depth_region))
-        depth_variance = float(np.var(depth_region))
-        depth_std = float(np.std(depth_region))
+        # Ensure minimum size
+        length_cm = max(1.0, length_cm)
+        breadth_cm = max(1.0, breadth_cm)
 
-        # Determine if object is 2D or 3D based on depth variance
-        is_3d = depth_std > self.DEPTH_VARIANCE_THRESHOLD
-
-        # Calculate distance factor (inverse of normalized depth)
-        # MiDaS output: higher = closer, so we invert
-        distance_factor = 1.0 / (
-            avg_depth + 0.1
-        )  # Add small value to avoid division by zero
-
-        # Calculate pixel-to-cm conversion
-        # Using pinhole camera model approximation
-        focal_length_pixels = (
-            self.focal_length_mm / self.sensor_width_mm
-        ) * image_width
-
-        # Estimate real-world size
-        # At reference_distance, we calibrate the conversion
-        scale = (self.reference_distance_cm * distance_factor) / focal_length_pixels
-
-        # Apply calibration scale factor
-        scale *= self._depth_scale_factor
-
-        # Length and Breadth (in the image plane)
-        length_cm = round(w * scale, 1)
-        breadth_cm = round(h * scale, 1)
-
-        # Height (depth dimension) for 3D objects
+        # Calculate height for 3D objects
         height_cm = None
         if is_3d:
-            # Estimate height from depth variation
-            depth_range = float(np.max(depth_region) - np.min(depth_region))
-            # Convert depth range to real-world height
-            height_cm = round(depth_range * self.reference_distance_cm * 0.5, 1)
-            # Ensure minimum reasonable height
-            if height_cm < 1.0:
-                height_cm = round(min(length_cm, breadth_cm) * 0.3, 1)
+            # Estimate height based on texture variance and shape
+            # Higher variance suggests more depth
+            depth_factor = min(1.0, texture_variance / 3000)
+            height_cm = round(
+                min(length_cm, breadth_cm) * (0.3 + depth_factor * 0.5), 1
+            )
+            height_cm = max(1.0, height_cm)
 
-        object_type = ObjectType.OBJECT_3D if is_3d else ObjectType.OBJECT_2D
-
-        return length_cm, breadth_cm, height_cm, object_type, avg_depth
+        return length_cm, breadth_cm, height_cm
 
     def _annotate_image(
         self, image: np.ndarray, objects: List[MeasuredObject3D]
     ) -> np.ndarray:
-        """
-        Draw measurement annotations on image
-
-        Args:
-            image: Original BGR image
-            objects: List of measured objects
-
-        Returns:
-            Annotated image
-        """
+        """Draw measurement annotations on image"""
         annotated = image.copy()
 
         for obj in objects:
             x, y, w, h = obj.bounding_box
-            center_x, center_y = obj.center
 
-            # Color based on object type
+            # Colors
             if obj.object_type == ObjectType.OBJECT_3D:
                 color = (0, 255, 0)  # Green for 3D
-                box_color = (0, 200, 0)
+                text_bg = (0, 180, 0)
             else:
                 color = (255, 165, 0)  # Orange for 2D
-                box_color = (200, 130, 0)
+                text_bg = (200, 130, 0)
 
             # Draw bounding box
-            cv2.rectangle(annotated, (x, y), (x + w, y + h), box_color, 2)
+            cv2.rectangle(annotated, (x, y), (x + w, y + h), color, 3)
 
             # Draw corner markers
-            marker_size = 10
-            corners = [(x, y), (x + w, y), (x, y + h), (x + w, y + h)]
-            for cx, cy in corners:
-                cv2.line(
-                    annotated, (cx - marker_size, cy), (cx + marker_size, cy), color, 2
-                )
-                cv2.line(
-                    annotated, (cx, cy - marker_size), (cx, cy + marker_size), color, 2
-                )
+            marker_len = 15
+            thickness = 3
+            # Top-left
+            cv2.line(annotated, (x, y), (x + marker_len, y), color, thickness)
+            cv2.line(annotated, (x, y), (x, y + marker_len), color, thickness)
+            # Top-right
+            cv2.line(annotated, (x + w, y), (x + w - marker_len, y), color, thickness)
+            cv2.line(annotated, (x + w, y), (x + w, y + marker_len), color, thickness)
+            # Bottom-left
+            cv2.line(annotated, (x, y + h), (x + marker_len, y + h), color, thickness)
+            cv2.line(annotated, (x, y + h), (x, y + h - marker_len), color, thickness)
+            # Bottom-right
+            cv2.line(
+                annotated, (x + w, y + h), (x + w - marker_len, y + h), color, thickness
+            )
+            cv2.line(
+                annotated, (x + w, y + h), (x + w, y + h - marker_len), color, thickness
+            )
 
-            # Prepare measurement text
-            type_text = f"[{obj.object_type.value}] {obj.label}"
-
+            # Prepare text
+            type_label = f"{obj.object_type.value}: {obj.label}"
             if obj.object_type == ObjectType.OBJECT_3D:
-                dim_text = (
-                    f"L:{obj.length_cm}cm B:{obj.breadth_cm}cm H:{obj.height_cm}cm"
-                )
+                dim_text = f"L:{obj.length_cm} B:{obj.breadth_cm} H:{obj.height_cm} cm"
             else:
-                dim_text = f"L:{obj.length_cm}cm B:{obj.breadth_cm}cm"
+                dim_text = f"L:{obj.length_cm} B:{obj.breadth_cm} cm"
 
-            # Background for text
             font = cv2.FONT_HERSHEY_SIMPLEX
-            font_scale = 0.6
+            font_scale = 0.7
             thickness = 2
 
-            # Type label at top
-            (text_w, text_h), _ = cv2.getTextSize(
-                type_text, font, font_scale, thickness
-            )
-            cv2.rectangle(
-                annotated, (x, y - text_h - 10), (x + text_w + 10, y), color, -1
-            )
+            # Draw label background and text at top
+            (tw, th), _ = cv2.getTextSize(type_label, font, font_scale, thickness)
+            cv2.rectangle(annotated, (x, y - th - 10), (x + tw + 10, y), text_bg, -1)
             cv2.putText(
                 annotated,
-                type_text,
+                type_label,
                 (x + 5, y - 5),
                 font,
                 font_scale,
-                (0, 0, 0),
+                (255, 255, 255),
                 thickness,
             )
 
-            # Dimensions at bottom
-            (dim_w, dim_h), _ = cv2.getTextSize(dim_text, font, font_scale, thickness)
+            # Draw dimensions at bottom
+            (dw, dh), _ = cv2.getTextSize(dim_text, font, font_scale, thickness)
             cv2.rectangle(
-                annotated, (x, y + h), (x + dim_w + 10, y + h + dim_h + 10), color, -1
+                annotated, (x, y + h), (x + dw + 10, y + h + dh + 10), text_bg, -1
             )
             cv2.putText(
                 annotated,
                 dim_text,
-                (x + 5, y + h + dim_h + 5),
+                (x + 5, y + h + dh + 5),
                 font,
                 font_scale,
-                (0, 0, 0),
+                (255, 255, 255),
                 thickness,
             )
 
             # Draw dimension arrows
-            # Horizontal (Length)
+            arrow_color = (255, 255, 255)
+            # Horizontal arrow (Length)
             mid_y = y + h // 2
             cv2.arrowedLine(
-                annotated, (x, mid_y), (x + w, mid_y), color, 2, tipLength=0.05
+                annotated,
+                (x + 5, mid_y),
+                (x + w - 5, mid_y),
+                arrow_color,
+                2,
+                tipLength=0.03,
             )
-
-            # Vertical (Breadth)
+            # Vertical arrow (Breadth)
             mid_x = x + w // 2
             cv2.arrowedLine(
-                annotated, (mid_x, y), (mid_x, y + h), color, 2, tipLength=0.05
+                annotated,
+                (mid_x, y + 5),
+                (mid_x, y + h - 5),
+                arrow_color,
+                2,
+                tipLength=0.03,
             )
 
         return annotated
 
     def process_frame(
-        self,
-        image: np.ndarray,
-        return_annotated: bool = True,
-        reference_object_cm: Optional[Tuple[float, float]] = None,
+        self, image: np.ndarray, return_annotated: bool = True
     ) -> RealtimeMeasurementResult:
         """
         Process a single frame and measure objects
-
-        Args:
-            image: BGR image (OpenCV format)
-            return_annotated: Whether to return annotated image
-            reference_object_cm: If provided, use first detected object as reference
-                                with these dimensions (width_cm, height_cm) for calibration
-
-        Returns:
-            RealtimeMeasurementResult with measurements
         """
-        import time
-
         start_time = time.time()
-
         height, width = image.shape[:2]
 
         try:
-            # Step 1: Detect objects
-            detected_objects = self._detect_objects(image)
+            # Detect objects using OpenCV
+            detected = self._detect_objects_opencv(image)
 
-            if not detected_objects:
+            if not detected:
                 return RealtimeMeasurementResult(
                     success=True,
-                    message="No objects detected in frame",
+                    message="No objects detected. Try better lighting or clearer background.",
                     objects=[],
                     frame_width=width,
                     frame_height=height,
-                    processing_time_ms=(time.time() - start_time) * 1000,
+                    processing_time_ms=round((time.time() - start_time) * 1000, 2),
                 )
 
-            # Step 2: Estimate depth
-            depth_map = self._estimate_depth(image)
-
-            # Step 3: Calibrate if reference provided
-            if reference_object_cm and len(detected_objects) > 0:
-                ref_obj = detected_objects[0]
-                ref_bbox = ref_obj["bbox"]
-                ref_width_px = ref_bbox[2]
-                ref_height_px = ref_bbox[3]
-
-                # Calculate calibration factor
-                expected_width_cm, expected_height_cm = reference_object_cm
-
-                # Use average of width and height for calibration
-                actual_width_cm, actual_height_cm, _, _, _ = (
-                    self._calculate_real_dimensions(ref_bbox, depth_map, width, height)
-                )
-
-                if actual_width_cm > 0 and actual_height_cm > 0:
-                    width_factor = expected_width_cm / actual_width_cm
-                    height_factor = expected_height_cm / actual_height_cm
-                    self._depth_scale_factor = (width_factor + height_factor) / 2
-
-            # Step 4: Calculate dimensions for each object
+            # Convert to measured objects
             measured_objects = []
-
-            for idx, obj in enumerate(detected_objects):
-                bbox = obj["bbox"]
-
-                length_cm, breadth_cm, height_cm, obj_type, depth_val = (
-                    self._calculate_real_dimensions(bbox, depth_map, width, height)
+            for obj in detected:
+                length_cm, breadth_cm, height_cm = self._calculate_dimensions(
+                    obj["bbox"], obj["is_3d"], obj["texture_variance"], height
                 )
 
-                measured_obj = MeasuredObject3D(
-                    object_id=idx + 1,
-                    object_type=obj_type,
-                    label=obj["label"],
-                    confidence=obj["confidence"],
+                measured = MeasuredObject3D(
+                    object_id=obj["id"],
+                    object_type=ObjectType.OBJECT_3D
+                    if obj["is_3d"]
+                    else ObjectType.OBJECT_2D,
+                    label=f"Object {obj['id']}",
+                    confidence=round(obj["confidence"], 2),
                     length_cm=length_cm,
                     breadth_cm=breadth_cm,
                     height_cm=height_cm,
-                    bounding_box=bbox,
+                    bounding_box=obj["bbox"],
                     center=obj["center"],
-                    depth_value=depth_val,
+                    depth_value=obj["texture_variance"] / 1000,
                 )
+                measured_objects.append(measured)
 
-                measured_objects.append(measured_obj)
-
-            # Step 5: Annotate image if requested
+            # Annotate image if requested
             annotated_base64 = None
             if return_annotated:
-                annotated_img = self._annotate_image(image, measured_objects)
+                annotated = self._annotate_image(image, measured_objects)
                 _, buffer = cv2.imencode(
-                    ".jpg", annotated_img, [cv2.IMWRITE_JPEG_QUALITY, 85]
+                    ".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 85]
                 )
                 annotated_base64 = base64.b64encode(buffer).decode("utf-8")
 
@@ -541,7 +375,7 @@ class RealtimeProcessor:
 
             return RealtimeMeasurementResult(
                 success=True,
-                message=f"Measured {len(measured_objects)} object(s)",
+                message=f"Detected {len(measured_objects)} object(s)",
                 objects=measured_objects,
                 frame_width=width,
                 frame_height=height,
@@ -557,34 +391,19 @@ class RealtimeProcessor:
                 objects=[],
                 frame_width=width,
                 frame_height=height,
-                processing_time_ms=(time.time() - start_time) * 1000,
+                processing_time_ms=round((time.time() - start_time) * 1000, 2),
             )
 
-    def calibrate(
-        self,
-        reference_distance_cm: float = 100.0,
-        focal_length_mm: float = 4.0,
-        sensor_width_mm: float = 6.0,
-    ):
-        """
-        Set camera calibration parameters
-
-        Args:
-            reference_distance_cm: Expected distance from camera to objects
-            focal_length_mm: Camera focal length in mm
-            sensor_width_mm: Camera sensor width in mm
-        """
-        self.reference_distance_cm = reference_distance_cm
-        self.focal_length_mm = focal_length_mm
-        self.sensor_width_mm = sensor_width_mm
-
+    def calibrate(self, reference_distance_cm: float = 30.0, scale_factor: float = 1.0):
+        """Set calibration parameters"""
+        self.REFERENCE_DISTANCE_CM = reference_distance_cm
+        self._scale_factor = scale_factor
         logger.info(
-            f"Calibration set: distance={reference_distance_cm}cm, "
-            f"focal={focal_length_mm}mm, sensor={sensor_width_mm}mm"
+            f"Calibration: distance={reference_distance_cm}cm, scale={scale_factor}"
         )
 
 
-# Global processor instance (lazy loaded)
+# Global processor instance
 _processor: Optional[RealtimeProcessor] = None
 
 
@@ -592,11 +411,7 @@ def get_processor() -> RealtimeProcessor:
     """Get or create the global processor instance"""
     global _processor
     if _processor is None:
-        _processor = RealtimeProcessor(
-            use_gpu=False,  # CPU for Render deployment
-            model_type="midas_small",  # Fastest model
-            confidence_threshold=0.4,
-        )
+        _processor = RealtimeProcessor(confidence_threshold=0.4)
     return _processor
 
 
@@ -604,14 +419,7 @@ def process_frame_for_measurement(
     image_data: bytes, return_annotated: bool = True
 ) -> RealtimeMeasurementResult:
     """
-    Convenience function to process image bytes
-
-    Args:
-        image_data: Raw image bytes (JPEG/PNG)
-        return_annotated: Whether to return annotated image
-
-    Returns:
-        Measurement result
+    Process image bytes for measurement
     """
     # Decode image
     nparr = np.frombuffer(image_data, np.uint8)

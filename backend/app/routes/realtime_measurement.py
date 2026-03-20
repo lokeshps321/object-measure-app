@@ -1,6 +1,6 @@
 """
 API route handlers for real-time measurement endpoints
-Supports both 2D and 3D object measurement
+Supports both 2D and 3D object measurement (Lightweight OpenCV version)
 """
 
 import cv2
@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v2", tags=["realtime-measurement"])
 
-# Lazy import to avoid loading models at startup
+# Lazy import to avoid loading at startup
 _processor = None
 
 
@@ -34,9 +34,7 @@ def get_processor():
     if _processor is None:
         from app.utils.realtime_processor import RealtimeProcessor
 
-        _processor = RealtimeProcessor(
-            use_gpu=False, model_type="midas_small", confidence_threshold=0.4
-        )
+        _processor = RealtimeProcessor(confidence_threshold=0.4)
     return _processor
 
 
@@ -55,14 +53,14 @@ def get_processor():
     - Automatic 2D vs 3D object detection
     - 2D objects: Returns Length and Breadth
     - 3D objects: Returns Length, Breadth, and Height
-    - Uses AI depth estimation (no special sensors needed)
+    - Uses OpenCV for fast processing
     - Works with any camera
     
     **For best results:**
-    - Keep camera steady
     - Good lighting conditions
+    - Plain/contrasting background
     - Objects should be clearly visible
-    - Provide calibration_distance_cm if known
+    - Hold camera ~30cm from objects
     
     **Returns:**
     - List of measured objects with dimensions in centimeters
@@ -151,8 +149,7 @@ async def measure_realtime(request: RealtimeMeasurementRequest):
     description="""
     Calibrate the measurement system with known reference values.
     
-    Provide the distance from camera to objects and optionally
-    a reference object with known dimensions for more accurate measurements.
+    Provide the distance from camera to objects for more accurate measurements.
     """,
 )
 async def calibrate_measurement(request: CalibrationRequest):
@@ -161,17 +158,14 @@ async def calibrate_measurement(request: CalibrationRequest):
     try:
         processor = get_processor()
 
-        processor.calibrate(reference_distance_cm=request.reference_distance_cm)
+        scale_factor = 1.0
+        if request.reference_object_width_cm:
+            scale_factor = request.reference_object_width_cm / 10.0  # Simple scaling
 
-        # If reference object dimensions provided, calculate scale factor
-        scale_factor = processor._depth_scale_factor
-
-        if request.reference_object_width_cm and request.reference_object_height_cm:
-            # Store for next calibration with image
-            processor._pending_calibration = (
-                request.reference_object_width_cm,
-                request.reference_object_height_cm,
-            )
+        processor.calibrate(
+            reference_distance_cm=request.reference_distance_cm,
+            scale_factor=scale_factor,
+        )
 
         return CalibrationResponse(
             success=True,
@@ -187,7 +181,7 @@ async def calibrate_measurement(request: CalibrationRequest):
 @router.get(
     "/status",
     summary="Get processor status",
-    description="Check if models are loaded and ready",
+    description="Check if processor is ready",
 )
 async def get_status():
     """Get current processor status"""
@@ -195,20 +189,15 @@ async def get_status():
     try:
         processor = get_processor()
 
-        models_loaded = (
-            processor._depth_model is not None
-            and processor._object_detector is not None
-        )
-
         return {
             "ready": True,
-            "models_loaded": models_loaded,
-            "device": str(processor.device),
-            "depth_model": processor.model_type,
+            "models_loaded": processor._models_loaded,
+            "device": "cpu",
+            "depth_model": "opencv_contour",
             "confidence_threshold": processor.confidence_threshold,
             "calibration": {
-                "reference_distance_cm": processor.reference_distance_cm,
-                "scale_factor": processor._depth_scale_factor,
+                "reference_distance_cm": processor.REFERENCE_DISTANCE_CM,
+                "scale_factor": processor._scale_factor,
             },
         }
 
@@ -218,22 +207,25 @@ async def get_status():
 
 @router.post(
     "/warmup",
-    summary="Warm up models",
-    description="Pre-load models for faster first inference",
+    summary="Warm up processor",
+    description="Pre-initialize processor for faster first inference",
 )
 async def warmup_models():
-    """Pre-load ML models"""
+    """Pre-initialize processor"""
 
     try:
         processor = get_processor()
 
-        # Create a dummy image to trigger model loading
+        # Create a dummy image to test processing
         dummy_image = np.zeros((480, 640, 3), dtype=np.uint8)
 
-        # This will load both models
+        # Add some test shapes
+        cv2.rectangle(dummy_image, (100, 100), (300, 300), (255, 255, 255), -1)
+
+        # Process to warm up
         processor.process_frame(dummy_image, return_annotated=False)
 
-        return {"success": True, "message": "Models loaded and ready"}
+        return {"success": True, "message": "Processor ready"}
 
     except Exception as e:
         logger.error(f"Warmup error: {e}")

@@ -5,16 +5,10 @@ python-multipart>=0.0.6
 pydantic>=2.5.3
 python-dotenv>=1.0.0
 
-# Image processing
+# Image processing (lightweight)
 opencv-python-headless>=4.9.0.80
 numpy>=1.26.3
 Pillow>=10.2.0
-
-# AI/ML for depth estimation and object detection
-torch>=2.0.0
-torchvision>=0.15.0
-timm>=0.9.0
-ultralytics>=8.1.0
 
 # Utilities
 scipy>=1.11.0
