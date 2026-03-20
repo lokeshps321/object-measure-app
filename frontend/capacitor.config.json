@@ -1,13 +1,19 @@
 {
   "appId": "com.objectmeasure.app",
-  "appName": "Object Measure",
+  "appName": "3D Measure",
   "webDir": "dist",
   "server": {
-    "androidScheme": "https"
+    "androidScheme": "https",
+    "cleartext": true
   },
   "plugins": {
     "Camera": {
       "quality": 90
     }
+  },
+  "android": {
+    "allowMixedContent": true,
+    "captureInput": true,
+    "webContentsDebuggingEnabled": true
   }
 }
