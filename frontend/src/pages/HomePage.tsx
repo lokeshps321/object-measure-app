@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useEffect, useRef } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import {
   IonPage,
   IonHeader,
@@ -11,250 +11,220 @@ import {
   IonIcon,
   IonSpinner,
   IonChip,
-  IonFabButton,
-  IonRange,
-  IonLabel,
-  IonItem,
-  useIonToast,
 } from '@ionic/react';
 import {
   camera,
-  videocam,
-  videocamOff,
   refreshOutline,
   checkmarkCircle,
   alertCircle,
   cubeOutline,
   squareOutline,
-  settingsOutline,
-  syncOutline,
-  flashOutline,
-  stopCircle,
-  playCircle,
+  resizeOutline,
+  images,
 } from 'ionicons/icons';
-import {
-  CameraStream,
-  requestCameraPermission,
-  isWebCameraSupported,
-  CapturedImage,
-  capturePhoto,
-} from '../services/camera';
+import { Camera, CameraResultType, CameraSource } from '@capacitor/camera';
 import {
   measureRealtime,
+  measureImage,
+  MeasurementResponse,
   RealtimeMeasurementResponse,
   MeasuredObject3D,
-  warmupModels,
+  MeasuredObject,
   checkHealth,
+  getApiStatus,
 } from '../services/api';
+
+// Check if v2 API is available
+async function isV2Available(): Promise<boolean> {
+  try {
+    const status = await getApiStatus();
+    return status.ready === true;
+  } catch {
+    return false;
+  }
+}
 
 const HomePage: React.FC = () => {
   // State
-  const [isLiveMode, setIsLiveMode] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
-  const [isStreaming, setIsStreaming] = useState(false);
-  const [measurements, setMeasurements] = useState<MeasuredObject3D[]>([]);
+  const [measurements, setMeasurements] = useState<(MeasuredObject3D | MeasuredObject)[]>([]);
   const [annotatedImage, setAnnotatedImage] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [processingTime, setProcessingTime] = useState<number>(0);
-  const [captureInterval, setCaptureInterval] = useState<number>(1000); // ms between frames
-  const [showSettings, setShowSettings] = useState(false);
-  const [calibrationDistance, setCalibrationDistance] = useState<number>(100); // cm
   const [apiReady, setApiReady] = useState(false);
-
-  // Refs
-  const videoRef = useRef<HTMLVideoElement>(null);
-  const cameraStreamRef = useRef<CameraStream | null>(null);
-  
-  const [presentToast] = useIonToast();
+  const [useV2Api, setUseV2Api] = useState(false);
+  const [capturedImage, setCapturedImage] = useState<string | null>(null);
 
   // Initialize
   useEffect(() => {
     const init = async () => {
-      await requestCameraPermission();
+      // Request camera permission
+      try {
+        await Camera.requestPermissions();
+      } catch (e) {
+        console.log('Camera permission request failed:', e);
+      }
       
-      // Check API health and warm up models
+      // Check API health
       const healthy = await checkHealth();
       setApiReady(healthy);
       
       if (healthy) {
-        // Warm up models in background
-        warmupModels().then(result => {
-          if (result.success) {
-            showToast('AI models ready', 'success');
-          }
-        });
+        // Check if v2 API is available
+        const v2Available = await isV2Available();
+        setUseV2Api(v2Available);
+        console.log('API v2 available:', v2Available);
       }
     };
     
     init();
-    
-    // Cleanup on unmount
-    return () => {
-      if (cameraStreamRef.current) {
-        cameraStreamRef.current.stop();
-      }
-    };
   }, []);
 
-  const showToast = useCallback((message: string, color: 'success' | 'danger' | 'warning' = 'success') => {
-    presentToast({
-      message,
-      duration: 2000,
-      color,
-      position: 'bottom',
-    });
-  }, [presentToast]);
+  // Capture photo using Capacitor Camera
+  const capturePhoto = async (): Promise<string | null> => {
+    try {
+      const image = await Camera.getPhoto({
+        quality: 85,
+        allowEditing: false,
+        resultType: CameraResultType.Base64,
+        source: CameraSource.Camera,
+        width: 1280,
+        height: 960,
+        correctOrientation: true,
+      });
+      return image.base64String || null;
+    } catch (error) {
+      console.error('Camera capture error:', error);
+      return null;
+    }
+  };
 
-  // Process a single frame
-  const processFrame = useCallback(async (frame: CapturedImage) => {
-    if (isProcessing) return;
-    
+  // Pick from gallery
+  const pickFromGallery = async (): Promise<string | null> => {
+    try {
+      const image = await Camera.getPhoto({
+        quality: 90,
+        allowEditing: false,
+        resultType: CameraResultType.Base64,
+        source: CameraSource.Photos,
+        width: 1920,
+        height: 1080,
+        correctOrientation: true,
+      });
+      return image.base64String || null;
+    } catch (error) {
+      console.error('Gallery pick error:', error);
+      return null;
+    }
+  };
+
+  // Process image with API
+  const processImage = useCallback(async (base64Image: string) => {
     setIsProcessing(true);
     setErrorMessage(null);
+    const startTime = Date.now();
     
     try {
-      const result: RealtimeMeasurementResponse = await measureRealtime(
-        frame.base64String,
-        {
+      if (useV2Api) {
+        // Use new v2 API with 2D/3D detection
+        const result: RealtimeMeasurementResponse = await measureRealtime(base64Image, {
           returnAnnotated: true,
-          calibrationDistanceCm: calibrationDistance,
-        }
-      );
+        });
 
-      if (result.success) {
-        setMeasurements(result.objects);
-        setProcessingTime(result.processing_time_ms);
+        setProcessingTime(result.processing_time_ms || (Date.now() - startTime));
         
-        if (result.annotated_image) {
-          setAnnotatedImage(`data:image/jpeg;base64,${result.annotated_image}`);
+        if (result.success && result.objects.length > 0) {
+          setMeasurements(result.objects);
+          if (result.annotated_image) {
+            setAnnotatedImage(`data:image/jpeg;base64,${result.annotated_image}`);
+          }
+        } else {
+          setErrorMessage(result.message || 'No objects detected');
+          setCapturedImage(`data:image/jpeg;base64,${base64Image}`);
         }
       } else {
-        setErrorMessage(result.message);
+        // Fallback to v1 API (A4 reference based)
+        const result: MeasurementResponse = await measureImage(base64Image);
+        
+        setProcessingTime(Date.now() - startTime);
+        
+        if (result.success && result.objects.length > 0) {
+          // Convert v1 objects to display format
+          const convertedObjects: MeasuredObject3D[] = result.objects.map((obj, idx) => ({
+            object_id: idx + 1,
+            object_type: '2D' as const,
+            label: `Object ${idx + 1}`,
+            confidence: 1.0,
+            length_cm: obj.width_cm,
+            breadth_cm: obj.height_cm,
+            height_cm: null,
+            bounding_box: obj.bounding_box,
+            center: [obj.bounding_box[0] + obj.bounding_box[2]/2, obj.bounding_box[1] + obj.bounding_box[3]/2] as [number, number],
+            depth_value: 0,
+          }));
+          setMeasurements(convertedObjects);
+          if (result.processed_image) {
+            setAnnotatedImage(`data:image/jpeg;base64,${result.processed_image}`);
+          }
+        } else {
+          setErrorMessage(result.message || 'No A4 paper detected. Please place objects on an A4 paper.');
+          setCapturedImage(`data:image/jpeg;base64,${base64Image}`);
+        }
       }
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Failed to process frame';
+      const message = error instanceof Error ? error.message : 'Failed to process image';
       setErrorMessage(message);
+      setCapturedImage(`data:image/jpeg;base64,${base64Image}`);
     } finally {
       setIsProcessing(false);
     }
-  }, [isProcessing, calibrationDistance]);
+  }, [useV2Api]);
 
-  // Start live camera streaming
-  const startLiveMode = useCallback(async () => {
-    if (!isWebCameraSupported()) {
-      showToast('Camera streaming not supported on this device', 'danger');
-      return;
-    }
-
-    if (!videoRef.current) return;
-
-    try {
-      // Initialize camera stream
-      cameraStreamRef.current = new CameraStream({
-        width: 1280,
-        height: 720,
-        facingMode: 'environment',
-        frameRate: 30,
-      });
-
-      const success = await cameraStreamRef.current.initialize(videoRef.current);
-      
-      if (success) {
-        setIsLiveMode(true);
-        setIsStreaming(true);
-        setMeasurements([]);
-        setAnnotatedImage(null);
-        setErrorMessage(null);
-        
-        // Start continuous capture
-        cameraStreamRef.current.startContinuousCapture(processFrame, captureInterval);
-        
-        showToast('Live measurement started', 'success');
-      } else {
-        showToast('Failed to start camera', 'danger');
-      }
-    } catch (error) {
-      console.error('Error starting live mode:', error);
-      showToast('Camera access denied', 'danger');
-    }
-  }, [captureInterval, processFrame, showToast]);
-
-  // Stop live mode
-  const stopLiveMode = useCallback(() => {
-    if (cameraStreamRef.current) {
-      cameraStreamRef.current.stop();
-      cameraStreamRef.current = null;
-    }
-    
-    setIsLiveMode(false);
-    setIsStreaming(false);
-    showToast('Live measurement stopped', 'warning');
-  }, [showToast]);
-
-  // Toggle streaming (pause/resume)
-  const toggleStreaming = useCallback(() => {
-    if (!cameraStreamRef.current) return;
-    
-    if (isStreaming) {
-      cameraStreamRef.current.stopContinuousCapture();
-      setIsStreaming(false);
-    } else {
-      cameraStreamRef.current.startContinuousCapture(processFrame, captureInterval);
-      setIsStreaming(true);
-    }
-  }, [isStreaming, captureInterval, processFrame]);
-
-  // Capture single photo
+  // Handle single photo capture
   const handleCapturePhoto = useCallback(async () => {
-    try {
-      setIsProcessing(true);
-      const image = await capturePhoto();
-      await processFrame(image);
-    } catch (error: unknown) {
-      const err = error as Error;
-      if (!err.message?.includes('cancel')) {
-        showToast(err.message || 'Failed to capture photo', 'danger');
-      }
-    } finally {
-      setIsProcessing(false);
+    const base64 = await capturePhoto();
+    if (base64) {
+      await processImage(base64);
     }
-  }, [processFrame, showToast]);
+  }, [processImage]);
+
+  // Handle gallery pick
+  const handlePickGallery = useCallback(async () => {
+    const base64 = await pickFromGallery();
+    if (base64) {
+      await processImage(base64);
+    }
+  }, [processImage]);
 
   // Reset everything
   const handleReset = useCallback(() => {
-    stopLiveMode();
     setMeasurements([]);
     setAnnotatedImage(null);
     setErrorMessage(null);
-  }, [stopLiveMode]);
+    setCapturedImage(null);
+  }, []);
 
-  // Switch camera
-  const switchCamera = useCallback(async () => {
-    if (cameraStreamRef.current) {
-      const wasStreaming = isStreaming;
-      if (wasStreaming) {
-        cameraStreamRef.current.stopContinuousCapture();
-      }
-      
-      await cameraStreamRef.current.switchCamera();
-      
-      if (wasStreaming) {
-        cameraStreamRef.current.startContinuousCapture(processFrame, captureInterval);
-      }
-      
-      showToast('Camera switched', 'success');
-    }
-  }, [isStreaming, captureInterval, processFrame, showToast]);
+  // Check if object is 3D type
+  const is3DObject = (obj: MeasuredObject3D | MeasuredObject): obj is MeasuredObject3D => {
+    return 'object_type' in obj;
+  };
 
-  // Render measurement card for an object
-  const renderMeasurementCard = (obj: MeasuredObject3D) => {
-    const is3D = obj.object_type === '3D';
+  // Render measurement card
+  const renderMeasurementCard = (obj: MeasuredObject3D | MeasuredObject, index: number) => {
+    const is3D = is3DObject(obj) && obj.object_type === '3D';
+    const label = is3DObject(obj) ? obj.label : `Object ${index + 1}`;
+    const lengthCm = is3DObject(obj) ? obj.length_cm : obj.width_cm;
+    const breadthCm = is3DObject(obj) ? obj.breadth_cm : obj.height_cm;
+    const heightCm = is3DObject(obj) ? obj.height_cm : null;
+    const confidence = is3DObject(obj) ? obj.confidence : 1;
     
     return (
       <div
-        key={obj.object_id}
+        key={index}
         style={{
-          background: is3D ? 'linear-gradient(135deg, #10b981 0%, #059669 100%)' : 'linear-gradient(135deg, #f59e0b 0%, #d97706 100%)',
+          background: is3D 
+            ? 'linear-gradient(135deg, #10b981 0%, #059669 100%)' 
+            : 'linear-gradient(135deg, #3b82f6 0%, #1d4ed8 100%)',
           borderRadius: '16px',
           padding: '16px',
           marginBottom: '12px',
@@ -265,39 +235,41 @@ const HomePage: React.FC = () => {
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
             <IonIcon icon={is3D ? cubeOutline : squareOutline} style={{ fontSize: '24px' }} />
             <span style={{ fontWeight: '600', fontSize: '16px' }}>
-              {obj.label.charAt(0).toUpperCase() + obj.label.slice(1)}
+              {label.charAt(0).toUpperCase() + label.slice(1)}
             </span>
           </div>
           <IonChip style={{ '--background': 'rgba(255,255,255,0.2)', '--color': 'white' }}>
-            {obj.object_type}
+            {is3D ? '3D' : '2D'}
           </IonChip>
         </div>
         
-        <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap' }}>
-          <div style={{ flex: 1, minWidth: '80px', textAlign: 'center', background: 'rgba(255,255,255,0.15)', borderRadius: '12px', padding: '12px' }}>
-            <div style={{ fontSize: '24px', fontWeight: '700' }}>{obj.length_cm}</div>
-            <div style={{ fontSize: '12px', opacity: 0.9 }}>Length (cm)</div>
+        <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+          <div style={{ flex: 1, minWidth: '70px', textAlign: 'center', background: 'rgba(255,255,255,0.15)', borderRadius: '12px', padding: '10px' }}>
+            <div style={{ fontSize: '22px', fontWeight: '700' }}>{lengthCm}</div>
+            <div style={{ fontSize: '11px', opacity: 0.9 }}>Width (cm)</div>
           </div>
-          <div style={{ flex: 1, minWidth: '80px', textAlign: 'center', background: 'rgba(255,255,255,0.15)', borderRadius: '12px', padding: '12px' }}>
-            <div style={{ fontSize: '24px', fontWeight: '700' }}>{obj.breadth_cm}</div>
-            <div style={{ fontSize: '12px', opacity: 0.9 }}>Breadth (cm)</div>
+          <div style={{ flex: 1, minWidth: '70px', textAlign: 'center', background: 'rgba(255,255,255,0.15)', borderRadius: '12px', padding: '10px' }}>
+            <div style={{ fontSize: '22px', fontWeight: '700' }}>{breadthCm}</div>
+            <div style={{ fontSize: '11px', opacity: 0.9 }}>Height (cm)</div>
           </div>
-          {is3D && obj.height_cm && (
-            <div style={{ flex: 1, minWidth: '80px', textAlign: 'center', background: 'rgba(255,255,255,0.15)', borderRadius: '12px', padding: '12px' }}>
-              <div style={{ fontSize: '24px', fontWeight: '700' }}>{obj.height_cm}</div>
-              <div style={{ fontSize: '12px', opacity: 0.9 }}>Height (cm)</div>
+          {is3D && heightCm && (
+            <div style={{ flex: 1, minWidth: '70px', textAlign: 'center', background: 'rgba(255,255,255,0.15)', borderRadius: '12px', padding: '10px' }}>
+              <div style={{ fontSize: '22px', fontWeight: '700' }}>{heightCm}</div>
+              <div style={{ fontSize: '11px', opacity: 0.9 }}>Depth (cm)</div>
             </div>
           )}
         </div>
         
-        <div style={{ marginTop: '8px', fontSize: '12px', opacity: 0.7, textAlign: 'right' }}>
-          Confidence: {Math.round(obj.confidence * 100)}%
-        </div>
+        {confidence < 1 && (
+          <div style={{ marginTop: '8px', fontSize: '11px', opacity: 0.7, textAlign: 'right' }}>
+            Confidence: {Math.round(confidence * 100)}%
+          </div>
+        )}
       </div>
     );
   };
 
-  // Landing screen (when not in live mode)
+  // Landing screen
   const renderLandingScreen = () => (
     <div style={{
       display: 'flex',
@@ -314,39 +286,41 @@ const HomePage: React.FC = () => {
         alignItems: 'center',
         justifyContent: 'center',
         textAlign: 'center',
-        padding: '40px 20px',
+        padding: '30px 20px',
       }}>
         <div style={{
-          width: '120px',
-          height: '120px',
-          borderRadius: '30px',
-          background: 'linear-gradient(135deg, #10b981 0%, #059669 100%)',
+          width: '100px',
+          height: '100px',
+          borderRadius: '25px',
+          background: 'linear-gradient(135deg, #3b82f6 0%, #1d4ed8 100%)',
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'center',
-          marginBottom: '30px',
-          boxShadow: '0 20px 40px rgba(16, 185, 129, 0.3)',
+          marginBottom: '24px',
+          boxShadow: '0 15px 30px rgba(59, 130, 246, 0.3)',
         }}>
-          <IonIcon icon={cubeOutline} style={{ fontSize: '60px', color: 'white' }} />
+          <IonIcon icon={resizeOutline} style={{ fontSize: '50px', color: 'white' }} />
         </div>
         
         <h1 style={{
           color: '#0f172a',
-          fontSize: '32px',
+          fontSize: '28px',
           fontWeight: '700',
-          margin: '0 0 12px 0',
+          margin: '0 0 10px 0',
         }}>
-          3D Measure
+          Object Measure
         </h1>
         
         <p style={{
           color: '#475569',
-          fontSize: '16px',
-          margin: '0 0 20px 0',
-          maxWidth: '300px',
+          fontSize: '15px',
+          margin: '0 0 16px 0',
+          maxWidth: '280px',
           lineHeight: '1.5',
         }}>
-          Real-time object measurement with AI depth estimation. No markers needed!
+          {useV2Api 
+            ? 'Measure any object with AI - no reference needed!' 
+            : 'Place objects on A4 paper to measure them accurately'}
         </p>
 
         {/* API Status */}
@@ -357,7 +331,7 @@ const HomePage: React.FC = () => {
           padding: '8px 16px',
           background: apiReady ? 'rgba(16, 185, 129, 0.1)' : 'rgba(239, 68, 68, 0.1)',
           borderRadius: '20px',
-          marginBottom: '30px',
+          marginBottom: '20px',
         }}>
           <div style={{
             width: '8px',
@@ -365,42 +339,50 @@ const HomePage: React.FC = () => {
             borderRadius: '50%',
             background: apiReady ? '#10b981' : '#ef4444',
           }} />
-          <span style={{ fontSize: '14px', color: apiReady ? '#059669' : '#dc2626' }}>
-            {apiReady ? 'AI Ready' : 'Connecting...'}
+          <span style={{ fontSize: '13px', color: apiReady ? '#059669' : '#dc2626' }}>
+            {apiReady ? (useV2Api ? 'AI Mode Ready' : 'Ready (A4 Mode)') : 'Connecting...'}
           </span>
         </div>
       </div>
 
-      {/* Features Card */}
+      {/* Instructions Card */}
       <div style={{
         background: 'white',
         borderRadius: '20px',
-        padding: '24px',
-        marginBottom: '24px',
-        boxShadow: '0 10px 30px rgba(0,0,0,0.08)',
+        padding: '20px',
+        marginBottom: '20px',
+        boxShadow: '0 8px 24px rgba(0,0,0,0.06)',
       }}>
-        <h3 style={{ color: '#0f172a', margin: '0 0 16px 0', fontSize: '18px' }}>
-          How it works
+        <h3 style={{ color: '#0f172a', margin: '0 0 14px 0', fontSize: '16px', fontWeight: '600' }}>
+          How to use
         </h3>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-          {[
-            { icon: videocam, text: 'Point camera at any object', color: '#10b981' },
-            { icon: cubeOutline, text: '2D: Length & Breadth', color: '#f59e0b' },
-            { icon: flashOutline, text: '3D: Length, Breadth & Height', color: '#10b981' },
-          ].map((step, idx) => (
-            <div key={idx} style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+          {(useV2Api ? [
+            { num: '1', text: 'Point camera at any object' },
+            { num: '2', text: 'Take a photo or use live mode' },
+            { num: '3', text: 'Get measurements instantly' },
+          ] : [
+            { num: '1', text: 'Place objects on A4 paper' },
+            { num: '2', text: 'Take a photo from above' },
+            { num: '3', text: 'Get measurements in cm' },
+          ]).map((step) => (
+            <div key={step.num} style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
               <div style={{
-                width: '44px',
-                height: '44px',
-                borderRadius: '12px',
-                background: `${step.color}15`,
+                width: '28px',
+                height: '28px',
+                borderRadius: '50%',
+                background: '#3b82f6',
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'center',
+                color: 'white',
+                fontSize: '14px',
+                fontWeight: '600',
+                flexShrink: 0,
               }}>
-                <IonIcon icon={step.icon} style={{ fontSize: '24px', color: step.color }} />
+                {step.num}
               </div>
-              <span style={{ color: '#334155', fontSize: '15px', fontWeight: '500' }}>
+              <span style={{ color: '#334155', fontSize: '14px' }}>
                 {step.text}
               </span>
             </div>
@@ -409,282 +391,89 @@ const HomePage: React.FC = () => {
       </div>
 
       {/* Action Buttons */}
-      <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', paddingBottom: '20px' }}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', paddingBottom: '20px' }}>
         <IonButton
           expand="block"
           size="large"
-          onClick={startLiveMode}
-          disabled={!apiReady}
+          onClick={handleCapturePhoto}
+          disabled={!apiReady || isProcessing}
           style={{
-            '--background': 'linear-gradient(135deg, #10b981 0%, #059669 100%)',
+            '--background': '#3b82f6',
             '--color': '#ffffff',
-            '--border-radius': '16px',
-            '--box-shadow': '0 10px 24px rgba(16, 185, 129, 0.3)',
-            height: '60px',
-            fontSize: '18px',
+            '--border-radius': '14px',
+            '--box-shadow': '0 8px 20px rgba(59, 130, 246, 0.25)',
+            height: '54px',
+            fontSize: '16px',
             fontWeight: '600',
           }}
         >
-          <IonIcon slot="start" icon={videocam} />
-          Start Live Measurement
+          <IonIcon slot="start" icon={camera} />
+          {isProcessing ? 'Processing...' : 'Take Photo'}
         </IonButton>
         
         <IonButton
           expand="block"
           size="large"
           fill="outline"
-          onClick={handleCapturePhoto}
-          disabled={!apiReady}
+          onClick={handlePickGallery}
+          disabled={!apiReady || isProcessing}
           style={{
-            '--border-radius': '16px',
+            '--border-radius': '14px',
             '--border-color': '#cbd5e1',
             '--color': '#0f172a',
-            height: '56px',
-            fontSize: '17px',
+            height: '50px',
+            fontSize: '15px',
           }}
         >
-          <IonIcon slot="start" icon={camera} />
-          Single Photo
+          <IonIcon slot="start" icon={images} />
+          Choose from Gallery
         </IonButton>
       </div>
     </div>
   );
 
-  // Live measurement screen
-  const renderLiveScreen = () => (
-    <div style={{ 
-      display: 'flex', 
-      flexDirection: 'column', 
-      height: '100%',
-      background: '#000',
-    }}>
-      {/* Video Preview */}
-      <div style={{ 
-        position: 'relative', 
-        flex: 1,
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        overflow: 'hidden',
-      }}>
-        {/* Live video feed */}
-        <video
-          ref={videoRef}
-          autoPlay
-          playsInline
-          muted
-          style={{
-            width: '100%',
-            height: '100%',
-            objectFit: 'cover',
-            display: annotatedImage ? 'none' : 'block',
-          }}
-        />
-        
-        {/* Annotated result overlay */}
-        {annotatedImage && (
-          <img
-            src={annotatedImage}
-            alt="Measurement result"
-            style={{
-              width: '100%',
-              height: '100%',
-              objectFit: 'contain',
-            }}
-          />
-        )}
-        
-        {/* Processing indicator */}
-        {isProcessing && (
-          <div style={{
-            position: 'absolute',
-            top: '16px',
-            right: '16px',
-            background: 'rgba(0,0,0,0.7)',
-            borderRadius: '20px',
-            padding: '8px 16px',
-            display: 'flex',
-            alignItems: 'center',
-            gap: '8px',
-          }}>
-            <IonSpinner name="crescent" style={{ width: '20px', height: '20px', color: '#10b981' }} />
-            <span style={{ color: 'white', fontSize: '14px' }}>Analyzing...</span>
-          </div>
-        )}
-        
-        {/* Stats overlay */}
-        <div style={{
-          position: 'absolute',
-          top: '16px',
-          left: '16px',
-          background: 'rgba(0,0,0,0.7)',
-          borderRadius: '12px',
-          padding: '8px 12px',
-        }}>
-          <div style={{ color: 'white', fontSize: '12px' }}>
-            <div>Objects: {measurements.length}</div>
-            <div>Time: {processingTime.toFixed(0)}ms</div>
-          </div>
-        </div>
-        
-        {/* Camera controls */}
-        <div style={{
-          position: 'absolute',
-          bottom: '16px',
-          left: '50%',
-          transform: 'translateX(-50%)',
-          display: 'flex',
-          gap: '16px',
-        }}>
-          <IonFabButton size="small" onClick={switchCamera} style={{ '--background': 'rgba(255,255,255,0.2)' }}>
-            <IonIcon icon={syncOutline} />
-          </IonFabButton>
-          
-          <IonFabButton 
-            onClick={toggleStreaming} 
-            style={{ 
-              '--background': isStreaming ? '#ef4444' : '#10b981',
-              width: '64px',
-              height: '64px',
-            }}
-          >
-            <IonIcon icon={isStreaming ? stopCircle : playCircle} style={{ fontSize: '32px' }} />
-          </IonFabButton>
-          
-          <IonFabButton size="small" onClick={() => setShowSettings(!showSettings)} style={{ '--background': 'rgba(255,255,255,0.2)' }}>
-            <IonIcon icon={settingsOutline} />
-          </IonFabButton>
-        </div>
-      </div>
-      
-      {/* Settings panel */}
-      {showSettings && (
-        <div style={{
-          background: '#1e293b',
-          padding: '16px',
-          borderTopLeftRadius: '20px',
-          borderTopRightRadius: '20px',
-        }}>
-          <IonItem lines="none" style={{ '--background': 'transparent', '--color': 'white' }}>
-            <IonLabel>Capture Interval: {captureInterval}ms</IonLabel>
-          </IonItem>
-          <IonRange
-            min={200}
-            max={2000}
-            step={100}
-            value={captureInterval}
-            onIonChange={(e) => setCaptureInterval(e.detail.value as number)}
-            style={{ '--bar-background': '#475569', '--knob-background': '#10b981' }}
-          />
-          
-          <IonItem lines="none" style={{ '--background': 'transparent', '--color': 'white' }}>
-            <IonLabel>Distance: {calibrationDistance}cm</IonLabel>
-          </IonItem>
-          <IonRange
-            min={30}
-            max={300}
-            step={10}
-            value={calibrationDistance}
-            onIonChange={(e) => setCalibrationDistance(e.detail.value as number)}
-            style={{ '--bar-background': '#475569', '--knob-background': '#10b981' }}
-          />
-        </div>
-      )}
-      
-      {/* Measurements panel */}
-      <div style={{
-        background: '#0f172a',
-        borderTopLeftRadius: '24px',
-        borderTopRightRadius: '24px',
-        padding: '20px',
-        maxHeight: '40%',
-        overflowY: 'auto',
-      }}>
-        <div style={{ 
-          display: 'flex', 
-          alignItems: 'center', 
-          justifyContent: 'space-between',
-          marginBottom: '16px',
-        }}>
-          <h2 style={{ color: 'white', margin: 0, fontSize: '20px', fontWeight: '600' }}>
-            Measurements
-          </h2>
-          <IonButton fill="clear" size="small" onClick={stopLiveMode} style={{ '--color': '#ef4444' }}>
-            <IonIcon slot="start" icon={videocamOff} />
-            Stop
-          </IonButton>
-        </div>
-        
-        {measurements.length > 0 ? (
-          measurements.map(renderMeasurementCard)
-        ) : (
-          <div style={{ 
-            textAlign: 'center', 
-            padding: '40px 20px',
-            color: '#64748b',
-          }}>
-            <IonIcon icon={cubeOutline} style={{ fontSize: '48px', marginBottom: '12px' }} />
-            <p>Point camera at objects to measure</p>
-          </div>
-        )}
-        
-        {errorMessage && (
-          <div style={{
-            background: 'rgba(239, 68, 68, 0.1)',
-            borderRadius: '12px',
-            padding: '12px',
-            display: 'flex',
-            alignItems: 'center',
-            gap: '12px',
-          }}>
-            <IonIcon icon={alertCircle} style={{ color: '#ef4444', fontSize: '24px' }} />
-            <span style={{ color: '#fca5a5', fontSize: '14px' }}>{errorMessage}</span>
-          </div>
-        )}
-      </div>
-    </div>
-  );
-
-  // Results screen (for single photo mode)
+  // Results screen
   const renderResultsScreen = () => (
     <div style={{ padding: '16px', background: '#f5f7fb', minHeight: '100%' }}>
-      {annotatedImage && (
+      {/* Result Image */}
+      {(annotatedImage || capturedImage) && (
         <IonCard style={{
           margin: '0 0 16px 0',
-          borderRadius: '20px',
+          borderRadius: '16px',
           overflow: 'hidden',
         }}>
           <img 
-            src={annotatedImage} 
-            alt="Measurement result" 
+            src={annotatedImage || capturedImage || ''} 
+            alt="Result" 
             style={{ width: '100%', display: 'block' }}
           />
         </IonCard>
       )}
 
+      {/* Measurements */}
       {measurements.length > 0 && (
-        <IonCard style={{ margin: '0 0 16px 0', borderRadius: '20px' }}>
+        <IonCard style={{ margin: '0 0 16px 0', borderRadius: '16px' }}>
           <IonCardContent>
             <div style={{
               display: 'flex',
               alignItems: 'center',
               gap: '10px',
-              marginBottom: '20px',
+              marginBottom: '16px',
             }}>
               <IonIcon icon={checkmarkCircle} style={{ color: '#10b981', fontSize: '24px' }} />
-              <h2 style={{ margin: 0, color: '#0f172a', fontSize: '20px' }}>
-                {measurements.length} Object(s) Measured
+              <h2 style={{ margin: 0, color: '#0f172a', fontSize: '18px', fontWeight: '600' }}>
+                {measurements.length} Object(s) Found
               </h2>
             </div>
             
-            {measurements.map(renderMeasurementCard)}
+            {measurements.map((obj, idx) => renderMeasurementCard(obj, idx))}
             
             <div style={{ 
-              marginTop: '16px', 
-              padding: '12px', 
+              marginTop: '12px', 
+              padding: '10px', 
               background: '#f1f5f9', 
-              borderRadius: '12px',
-              fontSize: '14px',
+              borderRadius: '10px',
+              fontSize: '13px',
               color: '#64748b',
             }}>
               Processing time: {processingTime.toFixed(0)}ms
@@ -693,30 +482,42 @@ const HomePage: React.FC = () => {
         </IonCard>
       )}
 
-      {errorMessage && !measurements.length && (
+      {/* Error Message */}
+      {errorMessage && (
         <IonCard style={{
           margin: '0 0 16px 0',
-          borderRadius: '20px',
-          background: '#fff1f2',
+          borderRadius: '16px',
+          background: '#fef2f2',
+          border: '1px solid #fecaca',
         }}>
           <IonCardContent>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-              <IonIcon icon={alertCircle} style={{ fontSize: '32px', color: '#dc2626' }} />
+            <div style={{ display: 'flex', alignItems: 'flex-start', gap: '12px' }}>
+              <IonIcon icon={alertCircle} style={{ fontSize: '28px', color: '#dc2626', flexShrink: 0 }} />
               <div>
-                <h3 style={{ margin: '0 0 4px 0', color: '#0f172a' }}>Detection Failed</h3>
-                <p style={{ margin: 0, color: '#475569' }}>{errorMessage}</p>
+                <h3 style={{ margin: '0 0 6px 0', color: '#991b1b', fontSize: '16px', fontWeight: '600' }}>
+                  Detection Issue
+                </h3>
+                <p style={{ margin: 0, color: '#7f1d1d', fontSize: '14px', lineHeight: '1.4' }}>
+                  {errorMessage}
+                </p>
+                {!useV2Api && (
+                  <p style={{ margin: '8px 0 0 0', color: '#991b1b', fontSize: '13px' }}>
+                    Tip: Make sure the A4 paper is fully visible and well-lit.
+                  </p>
+                )}
               </div>
             </div>
           </IonCardContent>
         </IonCard>
       )}
 
-      <div style={{ display: 'flex', gap: '12px' }}>
+      {/* Action Buttons */}
+      <div style={{ display: 'flex', gap: '10px' }}>
         <IonButton
           expand="block"
           onClick={handleReset}
           fill="outline"
-          style={{ flex: 1, '--border-radius': '14px' }}
+          style={{ flex: 1, '--border-radius': '12px', height: '48px' }}
         >
           <IonIcon slot="start" icon={refreshOutline} />
           Reset
@@ -724,11 +525,12 @@ const HomePage: React.FC = () => {
         
         <IonButton
           expand="block"
-          onClick={startLiveMode}
-          style={{ flex: 2, '--background': '#10b981', '--border-radius': '14px' }}
+          onClick={handleCapturePhoto}
+          disabled={isProcessing}
+          style={{ flex: 2, '--background': '#3b82f6', '--border-radius': '12px', height: '48px' }}
         >
-          <IonIcon slot="start" icon={videocam} />
-          Live Mode
+          <IonIcon slot="start" icon={camera} />
+          {isProcessing ? 'Processing...' : 'New Photo'}
         </IonButton>
       </div>
     </div>
@@ -738,60 +540,46 @@ const HomePage: React.FC = () => {
     <IonPage>
       <IonHeader>
         <IonToolbar style={{
-          '--background': isLiveMode ? '#0f172a' : '#ffffff',
-          '--color': isLiveMode ? '#ffffff' : '#0f172a',
+          '--background': '#ffffff',
+          '--color': '#0f172a',
         }}>
           <IonTitle>
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-              <IonIcon icon={cubeOutline} />
-              3D Measure
-              {isLiveMode && (
-                <IonChip style={{ 
-                  '--background': '#10b981', 
-                  '--color': 'white',
-                  marginLeft: '8px',
-                  fontSize: '12px',
-                }}>
-                  LIVE
-                </IonChip>
-              )}
+              <IonIcon icon={resizeOutline} />
+              Object Measure
             </div>
           </IonTitle>
         </IonToolbar>
       </IonHeader>
 
-      <IonContent fullscreen style={{ '--background': isLiveMode ? '#000' : '#f5f7fb' }}>
+      <IonContent fullscreen style={{ '--background': '#f5f7fb' }}>
         {/* Loading Overlay */}
-        {isProcessing && !isLiveMode && (
+        {isProcessing && (
           <div style={{
             position: 'fixed',
             top: 0,
             left: 0,
             right: 0,
             bottom: 0,
-            background: 'rgba(0, 0, 0, 0.85)',
+            background: 'rgba(0, 0, 0, 0.8)',
             display: 'flex',
             flexDirection: 'column',
             alignItems: 'center',
             justifyContent: 'center',
             zIndex: 9999,
           }}>
-            <IonSpinner name="crescent" style={{ width: '60px', height: '60px', color: '#10b981' }} />
-            <p style={{ color: 'white', marginTop: '20px', fontSize: '16px' }}>
-              Analyzing with AI...
+            <IonSpinner name="crescent" style={{ width: '50px', height: '50px', color: '#3b82f6' }} />
+            <p style={{ color: 'white', marginTop: '16px', fontSize: '15px' }}>
+              Analyzing image...
             </p>
           </div>
         )}
 
         {/* Main Content */}
-        {isLiveMode ? (
-          renderLiveScreen()
+        {measurements.length > 0 || annotatedImage || errorMessage || capturedImage ? (
+          renderResultsScreen()
         ) : (
-          measurements.length > 0 || annotatedImage || errorMessage ? (
-            renderResultsScreen()
-          ) : (
-            renderLandingScreen()
-          )
+          renderLandingScreen()
         )}
       </IonContent>
     </IonPage>
