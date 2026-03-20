@@ -25,37 +25,24 @@ import {
 import { Camera, CameraResultType, CameraSource } from '@capacitor/camera';
 import {
   measureRealtime,
-  measureImage,
-  MeasurementResponse,
   RealtimeMeasurementResponse,
   MeasuredObject3D,
-  MeasuredObject,
   checkHealth,
-  getApiStatus,
+  warmupModels,
 } from '../services/api';
-
-// Check if v2 API is available
-async function isV2Available(): Promise<boolean> {
-  try {
-    const status = await getApiStatus();
-    return status.ready === true;
-  } catch {
-    return false;
-  }
-}
 
 const HomePage: React.FC = () => {
   // State
   const [isProcessing, setIsProcessing] = useState(false);
-  const [measurements, setMeasurements] = useState<(MeasuredObject3D | MeasuredObject)[]>([]);
+  const [isWarmingUp, setIsWarmingUp] = useState(false);
+  const [measurements, setMeasurements] = useState<MeasuredObject3D[]>([]);
   const [annotatedImage, setAnnotatedImage] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [processingTime, setProcessingTime] = useState<number>(0);
   const [apiReady, setApiReady] = useState(false);
-  const [useV2Api, setUseV2Api] = useState(false);
   const [capturedImage, setCapturedImage] = useState<string | null>(null);
 
-  // Initialize
+  // Initialize and warm up models
   useEffect(() => {
     const init = async () => {
       // Request camera permission
@@ -70,10 +57,15 @@ const HomePage: React.FC = () => {
       setApiReady(healthy);
       
       if (healthy) {
-        // Check if v2 API is available
-        const v2Available = await isV2Available();
-        setUseV2Api(v2Available);
-        console.log('API v2 available:', v2Available);
+        // Warm up the AI models
+        setIsWarmingUp(true);
+        try {
+          const warmupResult = await warmupModels();
+          console.log('Models warmup:', warmupResult);
+        } catch (e) {
+          console.log('Model warmup failed:', e);
+        }
+        setIsWarmingUp(false);
       }
     };
     
@@ -118,58 +110,30 @@ const HomePage: React.FC = () => {
     }
   };
 
-  // Process image with API
+  // Process image with v2 API (real-time 2D/3D measurement)
   const processImage = useCallback(async (base64Image: string) => {
     setIsProcessing(true);
     setErrorMessage(null);
     const startTime = Date.now();
     
     try {
-      if (useV2Api) {
-        // Use new v2 API with 2D/3D detection
-        const result: RealtimeMeasurementResponse = await measureRealtime(base64Image, {
-          returnAnnotated: true,
-        });
+      // Use v2 API with AI-powered 2D/3D detection
+      const result: RealtimeMeasurementResponse = await measureRealtime(base64Image, {
+        returnAnnotated: true,
+      });
 
-        setProcessingTime(result.processing_time_ms || (Date.now() - startTime));
-        
-        if (result.success && result.objects.length > 0) {
-          setMeasurements(result.objects);
-          if (result.annotated_image) {
-            setAnnotatedImage(`data:image/jpeg;base64,${result.annotated_image}`);
-          }
-        } else {
-          setErrorMessage(result.message || 'No objects detected');
-          setCapturedImage(`data:image/jpeg;base64,${base64Image}`);
+      setProcessingTime(result.processing_time_ms || (Date.now() - startTime));
+      
+      if (result.success && result.objects.length > 0) {
+        setMeasurements(result.objects);
+        if (result.annotated_image) {
+          setAnnotatedImage(`data:image/jpeg;base64,${result.annotated_image}`);
         }
+        setCapturedImage(null);
       } else {
-        // Fallback to v1 API (A4 reference based)
-        const result: MeasurementResponse = await measureImage(base64Image);
-        
-        setProcessingTime(Date.now() - startTime);
-        
-        if (result.success && result.objects.length > 0) {
-          // Convert v1 objects to display format
-          const convertedObjects: MeasuredObject3D[] = result.objects.map((obj, idx) => ({
-            object_id: idx + 1,
-            object_type: '2D' as const,
-            label: `Object ${idx + 1}`,
-            confidence: 1.0,
-            length_cm: obj.width_cm,
-            breadth_cm: obj.height_cm,
-            height_cm: null,
-            bounding_box: obj.bounding_box,
-            center: [obj.bounding_box[0] + obj.bounding_box[2]/2, obj.bounding_box[1] + obj.bounding_box[3]/2] as [number, number],
-            depth_value: 0,
-          }));
-          setMeasurements(convertedObjects);
-          if (result.processed_image) {
-            setAnnotatedImage(`data:image/jpeg;base64,${result.processed_image}`);
-          }
-        } else {
-          setErrorMessage(result.message || 'No A4 paper detected. Please place objects on an A4 paper.');
-          setCapturedImage(`data:image/jpeg;base64,${base64Image}`);
-        }
+        setErrorMessage(result.message || 'No objects detected. Try pointing at a clear object.');
+        setCapturedImage(`data:image/jpeg;base64,${base64Image}`);
+        setMeasurements([]);
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to process image';
@@ -178,7 +142,7 @@ const HomePage: React.FC = () => {
     } finally {
       setIsProcessing(false);
     }
-  }, [useV2Api]);
+  }, []);
 
   // Handle single photo capture
   const handleCapturePhoto = useCallback(async () => {
@@ -204,19 +168,14 @@ const HomePage: React.FC = () => {
     setCapturedImage(null);
   }, []);
 
-  // Check if object is 3D type
-  const is3DObject = (obj: MeasuredObject3D | MeasuredObject): obj is MeasuredObject3D => {
-    return 'object_type' in obj;
-  };
-
   // Render measurement card
-  const renderMeasurementCard = (obj: MeasuredObject3D | MeasuredObject, index: number) => {
-    const is3D = is3DObject(obj) && obj.object_type === '3D';
-    const label = is3DObject(obj) ? obj.label : `Object ${index + 1}`;
-    const lengthCm = is3DObject(obj) ? obj.length_cm : obj.width_cm;
-    const breadthCm = is3DObject(obj) ? obj.breadth_cm : obj.height_cm;
-    const heightCm = is3DObject(obj) ? obj.height_cm : null;
-    const confidence = is3DObject(obj) ? obj.confidence : 1;
+  const renderMeasurementCard = (obj: MeasuredObject3D, index: number) => {
+    const is3D = obj.object_type === '3D';
+    const label = obj.label;
+    const lengthCm = obj.length_cm;
+    const breadthCm = obj.breadth_cm;
+    const heightCm = obj.height_cm;
+    const confidence = obj.confidence;
     
     return (
       <div
@@ -318,9 +277,7 @@ const HomePage: React.FC = () => {
           maxWidth: '280px',
           lineHeight: '1.5',
         }}>
-          {useV2Api 
-            ? 'Measure any object with AI - no reference needed!' 
-            : 'Place objects on A4 paper to measure them accurately'}
+          Measure any object with AI - 2D & 3D detection!
         </p>
 
         {/* API Status */}
@@ -340,7 +297,7 @@ const HomePage: React.FC = () => {
             background: apiReady ? '#10b981' : '#ef4444',
           }} />
           <span style={{ fontSize: '13px', color: apiReady ? '#059669' : '#dc2626' }}>
-            {apiReady ? (useV2Api ? 'AI Mode Ready' : 'Ready (A4 Mode)') : 'Connecting...'}
+            {isWarmingUp ? 'Loading AI models...' : (apiReady ? 'AI Ready' : 'Connecting...')}
           </span>
         </div>
       </div>
@@ -357,15 +314,11 @@ const HomePage: React.FC = () => {
           How to use
         </h3>
         <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-          {(useV2Api ? [
+          {[
             { num: '1', text: 'Point camera at any object' },
-            { num: '2', text: 'Take a photo or use live mode' },
-            { num: '3', text: 'Get measurements instantly' },
-          ] : [
-            { num: '1', text: 'Place objects on A4 paper' },
-            { num: '2', text: 'Take a photo from above' },
-            { num: '3', text: 'Get measurements in cm' },
-          ]).map((step) => (
+            { num: '2', text: 'Take a photo' },
+            { num: '3', text: 'Get 2D/3D measurements instantly' },
+          ].map((step) => (
             <div key={step.num} style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
               <div style={{
                 width: '28px',
@@ -390,13 +343,14 @@ const HomePage: React.FC = () => {
         </div>
       </div>
 
+
       {/* Action Buttons */}
       <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', paddingBottom: '20px' }}>
         <IonButton
           expand="block"
           size="large"
           onClick={handleCapturePhoto}
-          disabled={!apiReady || isProcessing}
+          disabled={!apiReady || isProcessing || isWarmingUp}
           style={{
             '--background': '#3b82f6',
             '--color': '#ffffff',
@@ -408,7 +362,7 @@ const HomePage: React.FC = () => {
           }}
         >
           <IonIcon slot="start" icon={camera} />
-          {isProcessing ? 'Processing...' : 'Take Photo'}
+          {isWarmingUp ? 'Loading AI...' : (isProcessing ? 'Processing...' : 'Take Photo')}
         </IonButton>
         
         <IonButton
@@ -416,7 +370,7 @@ const HomePage: React.FC = () => {
           size="large"
           fill="outline"
           onClick={handlePickGallery}
-          disabled={!apiReady || isProcessing}
+          disabled={!apiReady || isProcessing || isWarmingUp}
           style={{
             '--border-radius': '14px',
             '--border-color': '#cbd5e1',
@@ -500,11 +454,9 @@ const HomePage: React.FC = () => {
                 <p style={{ margin: 0, color: '#7f1d1d', fontSize: '14px', lineHeight: '1.4' }}>
                   {errorMessage}
                 </p>
-                {!useV2Api && (
-                  <p style={{ margin: '8px 0 0 0', color: '#991b1b', fontSize: '13px' }}>
-                    Tip: Make sure the A4 paper is fully visible and well-lit.
-                  </p>
-                )}
+                <p style={{ margin: '8px 0 0 0', color: '#991b1b', fontSize: '13px' }}>
+                  Tip: Make sure the object is clearly visible with good lighting.
+                </p>
               </div>
             </div>
           </IonCardContent>
