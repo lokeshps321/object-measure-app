@@ -75,7 +75,9 @@ class RealtimeProcessor:
     """
 
     # Detection parameters
-    MIN_OBJECT_AREA = 800  # Minimum object size in pixels
+    MIN_OBJECT_AREA = (
+        300  # Minimum object size in pixels (lowered for small objects like earbuds)
+    )
     MAX_OBJECT_AREA = 500000  # Maximum object size
 
     def __init__(self, confidence_threshold: float = 0.4):
@@ -268,9 +270,9 @@ class RealtimeProcessor:
 
         # Method 4: Color-based detection (objects that differ from white)
         hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
-        # Detect non-white areas (saturation > 30 or value < 200)
-        color_mask = cv2.inRange(hsv, (0, 30, 0), (180, 255, 255))
-        low_value_mask = cv2.inRange(hsv, (0, 0, 0), (180, 255, 200))
+        # Detect non-white areas (saturation > 20 or value < 220)
+        color_mask = cv2.inRange(hsv, (0, 20, 0), (180, 255, 255))
+        low_value_mask = cv2.inRange(hsv, (0, 0, 0), (180, 255, 220))
         combined_color = cv2.bitwise_or(color_mask, low_value_mask)
         if paper_mask is not None:
             combined_color = cv2.bitwise_and(combined_color, paper_mask)
@@ -281,6 +283,24 @@ class RealtimeProcessor:
             combined_color, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
         )
         all_contours.extend(contours4)
+
+        # Method 5: Shadow/gradient detection for white objects on white paper
+        # Detect subtle shadows and gradients that indicate 3D objects
+        laplacian = cv2.Laplacian(blurred, cv2.CV_64F)
+        laplacian = np.uint8(np.absolute(laplacian))
+        _, shadow_mask = cv2.threshold(laplacian, 10, 255, cv2.THRESH_BINARY)
+        if paper_mask is not None:
+            shadow_mask = cv2.bitwise_and(shadow_mask, paper_mask)
+        shadow_mask = cv2.morphologyEx(
+            shadow_mask, cv2.MORPH_CLOSE, kernel, iterations=3
+        )
+        shadow_mask = cv2.morphologyEx(
+            shadow_mask, cv2.MORPH_OPEN, kernel, iterations=1
+        )
+        contours5, _ = cv2.findContours(
+            shadow_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+        )
+        all_contours.extend(contours5)
 
         # Sort all contours by area and remove duplicates
         all_contours = sorted(all_contours, key=cv2.contourArea, reverse=True)
