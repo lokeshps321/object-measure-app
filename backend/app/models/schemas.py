@@ -82,7 +82,7 @@ class MeasuredObject3DResponse(BaseModel):
 
     # Dimensions
     length_cm: float = Field(..., description="Length in centimeters")
-    breadth_cm: float = Field(..., description="Breadth in centimeters")
+    width_cm: float = Field(..., description="Width in centimeters")
     height_cm: Optional[float] = Field(
         None, description="Height in cm (only for 3D objects)"
     )
@@ -92,7 +92,6 @@ class MeasuredObject3DResponse(BaseModel):
         ..., description="(x, y, width, height) in pixels"
     )
     center: Tuple[int, int] = Field(..., description="Center point (x, y)")
-    depth_value: float = Field(..., description="Relative depth value")
 
     class Config:
         json_schema_extra = {
@@ -102,11 +101,10 @@ class MeasuredObject3DResponse(BaseModel):
                 "label": "box",
                 "confidence": 0.92,
                 "length_cm": 15.5,
-                "breadth_cm": 10.2,
+                "width_cm": 10.2,
                 "height_cm": 8.0,
                 "bounding_box": [100, 150, 200, 130],
                 "center": [200, 215],
-                "depth_value": 0.65,
             }
         }
 
@@ -161,11 +159,10 @@ class RealtimeMeasurementResponse(BaseModel):
                         "label": "box",
                         "confidence": 0.92,
                         "length_cm": 15.5,
-                        "breadth_cm": 10.2,
+                        "width_cm": 10.2,
                         "height_cm": 8.0,
                         "bounding_box": [100, 150, 200, 130],
                         "center": [200, 215],
-                        "depth_value": 0.65,
                     },
                     {
                         "object_id": 2,
@@ -173,11 +170,10 @@ class RealtimeMeasurementResponse(BaseModel):
                         "label": "book",
                         "confidence": 0.88,
                         "length_cm": 21.0,
-                        "breadth_cm": 29.7,
+                        "width_cm": 29.7,
                         "height_cm": None,
                         "bounding_box": [350, 200, 250, 350],
                         "center": [475, 375],
-                        "depth_value": 0.52,
                     },
                 ],
                 "frame_width": 1920,

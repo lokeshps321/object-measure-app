@@ -120,11 +120,10 @@ async def measure_realtime(request: RealtimeMeasurementRequest):
                 label=obj.label,
                 confidence=round(obj.confidence, 2),
                 length_cm=obj.length_cm,
-                breadth_cm=obj.breadth_cm,
+                width_cm=obj.width_cm,
                 height_cm=obj.height_cm,
                 bounding_box=obj.bounding_box,
                 center=obj.center,
-                depth_value=round(obj.depth_value, 3),
             )
             for obj in result.objects
         ]
