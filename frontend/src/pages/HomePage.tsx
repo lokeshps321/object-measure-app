@@ -12,9 +12,6 @@ import {
   IonSpinner,
   IonChip,
   IonFabButton,
-  IonSegment,
-  IonSegmentButton,
-  IonLabel,
 } from '@ionic/react';
 import {
   camera,
@@ -26,7 +23,6 @@ import {
   squareOutline,
   resizeOutline,
   close,
-  cardOutline,
   documentOutline,
   checkmark,
   warning,
@@ -37,7 +33,6 @@ import {
   RealtimeMeasurementResponse,
   MeasuredObject3D,
   CalibrationInfo,
-  ReferenceType,
   checkHealth,
   warmupModels,
   calibrateMeasurement,
@@ -56,7 +51,6 @@ const HomePage: React.FC = () => {
   const [capturedImage, setCapturedImage] = useState<string | null>(null);
   const [liveResults, setLiveResults] = useState<MeasuredObject3D[]>([]);
   const [calibrationInfo, setCalibrationInfo] = useState<CalibrationInfo | null>(null);
-  const [referenceType, setReferenceType] = useState<ReferenceType>('credit_card');
   
   const liveIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const isCapturingRef = useRef(false);
@@ -73,8 +67,8 @@ const HomePage: React.FC = () => {
         setIsWarmingUp(true);
         try {
           await warmupModels();
-          // Set default calibration
-          await calibrateMeasurement(referenceType);
+          // Set default calibration (A4 paper)
+          await calibrateMeasurement(30);
         } catch (e) {
           console.log('Warmup failed:', e);
         }
@@ -89,16 +83,6 @@ const HomePage: React.FC = () => {
       stopLiveMode();
     };
   }, []);
-
-  // Handle reference type change
-  const handleReferenceChange = async (newType: ReferenceType) => {
-    setReferenceType(newType);
-    try {
-      await calibrateMeasurement(newType);
-    } catch (e) {
-      console.log('Calibration update failed:', e);
-    }
-  };
 
   // Start live camera preview
   const startLiveMode = async () => {
@@ -254,7 +238,7 @@ const HomePage: React.FC = () => {
           color: 'white',
         }}>
           <IonIcon icon={isCalibrated ? checkmark : warning} />
-          {isCalibrated ? 'Calibrated' : 'No Reference'}
+          {isCalibrated ? 'A4 Detected' : 'No A4 Paper'}
         </div>
       );
     }
@@ -282,7 +266,7 @@ const HomePage: React.FC = () => {
             color: isCalibrated ? '#059669' : '#d97706',
             fontSize: '14px',
           }}>
-            {isCalibrated ? 'Reference Detected' : 'No Reference Found'}
+            {isCalibrated ? 'A4 Paper Detected' : 'No A4 Paper Found'}
           </span>
         </div>
         <p style={{ 
@@ -292,8 +276,8 @@ const HomePage: React.FC = () => {
           lineHeight: '1.4',
         }}>
           {isCalibrated 
-            ? `Using ${info.reference_type.replace('_', ' ')} (${info.pixels_per_cm.toFixed(1)} px/cm)`
-            : 'Place a credit card or A4 paper next to objects for accurate measurements'
+            ? `Calibrated: ${info.pixels_per_cm.toFixed(1)} px/cm`
+            : 'Place objects on A4 paper (21 x 29.7 cm) for accurate measurements'
           }
         </p>
       </div>
@@ -335,8 +319,8 @@ const HomePage: React.FC = () => {
             <div style={{ fontSize: '11px', opacity: 0.9 }}>Length (cm)</div>
           </div>
           <div style={{ flex: 1, minWidth: '70px', textAlign: 'center', background: 'rgba(255,255,255,0.15)', borderRadius: '12px', padding: '10px' }}>
-            <div style={{ fontSize: '22px', fontWeight: '700' }}>{obj.breadth_cm}</div>
-            <div style={{ fontSize: '11px', opacity: 0.9 }}>Breadth (cm)</div>
+            <div style={{ fontSize: '22px', fontWeight: '700' }}>{obj.width_cm}</div>
+            <div style={{ fontSize: '11px', opacity: 0.9 }}>Width (cm)</div>
           </div>
           {is3D && obj.height_cm && (
             <div style={{ flex: 1, minWidth: '70px', textAlign: 'center', background: 'rgba(255,255,255,0.15)', borderRadius: '12px', padding: '10px' }}>
@@ -374,7 +358,7 @@ const HomePage: React.FC = () => {
         marginBottom: '12px',
       }}>
         <span style={{ color: 'white', fontSize: '12px', opacity: 0.8 }}>
-          Reference: {referenceType.replace('_', ' ')}
+          Reference: A4 Paper (21 x 29.7 cm)
         </span>
         {renderCalibrationBadge(calibrationInfo, true)}
       </div>
@@ -399,7 +383,7 @@ const HomePage: React.FC = () => {
               </div>
               <div style={{ display: 'flex', gap: '16px', marginTop: '8px', fontSize: '14px' }}>
                 <span>L: {obj.length_cm}cm</span>
-                <span>B: {obj.breadth_cm}cm</span>
+                <span>W: {obj.width_cm}cm</span>
                 {obj.object_type === '3D' && obj.height_cm && <span>H: {obj.height_cm}cm</span>}
               </div>
             </div>
@@ -410,11 +394,11 @@ const HomePage: React.FC = () => {
       {liveResults.length === 0 && (
         <div style={{ textAlign: 'center', marginBottom: '16px' }}>
           <p style={{ color: 'white', margin: '0 0 8px 0', opacity: 0.9 }}>
-            Point camera at objects to measure
+            Point camera at objects on A4 paper
           </p>
           {!calibrationInfo?.reference_detected && (
             <p style={{ color: '#fbbf24', margin: 0, fontSize: '12px' }}>
-              Add a credit card for accurate measurements
+              Place A4 paper in view for accurate measurements
             </p>
           )}
         </div>
@@ -479,7 +463,7 @@ const HomePage: React.FC = () => {
           fontWeight: '700',
           margin: '0 0 8px 0',
         }}>
-          3D Object Measure
+          Object Measure
         </h1>
         
         <p style={{
@@ -489,7 +473,7 @@ const HomePage: React.FC = () => {
           maxWidth: '280px',
           lineHeight: '1.5',
         }}>
-          Accurate 2D/3D measurements with reference calibration
+          Measure objects accurately using A4 paper as reference
         </p>
 
         {/* API Status */}
@@ -514,7 +498,7 @@ const HomePage: React.FC = () => {
         </div>
       </div>
 
-      {/* Reference Selection */}
+      {/* A4 Paper Info */}
       <div style={{
         background: 'white',
         borderRadius: '20px',
@@ -522,37 +506,29 @@ const HomePage: React.FC = () => {
         marginBottom: '16px',
         boxShadow: '0 8px 24px rgba(0,0,0,0.06)',
       }}>
-        <h3 style={{ color: '#0f172a', margin: '0 0 12px 0', fontSize: '15px', fontWeight: '600' }}>
-          Reference Object
-        </h3>
-        <p style={{ color: '#64748b', fontSize: '12px', margin: '0 0 12px 0' }}>
-          Place this next to objects for accurate measurements
-        </p>
-        
-        <IonSegment 
-          value={referenceType} 
-          onIonChange={(e) => handleReferenceChange(e.detail.value as ReferenceType)}
-          style={{ '--background': '#f1f5f9' }}
-        >
-          <IonSegmentButton value="credit_card">
-            <IonIcon icon={cardOutline} />
-            <IonLabel style={{ fontSize: '11px' }}>Credit Card</IonLabel>
-          </IonSegmentButton>
-          <IonSegmentButton value="a4_paper">
-            <IonIcon icon={documentOutline} />
-            <IonLabel style={{ fontSize: '11px' }}>A4 Paper</IonLabel>
-          </IonSegmentButton>
-        </IonSegment>
-        
-        <p style={{ 
-          color: '#94a3b8', 
-          fontSize: '11px', 
-          margin: '10px 0 0 0',
-          textAlign: 'center',
-        }}>
-          {referenceType === 'credit_card' 
-            ? 'Standard card: 8.56 x 5.4 cm' 
-            : 'A4 paper: 21.0 x 29.7 cm'}
+        <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '12px' }}>
+          <div style={{
+            width: '48px',
+            height: '48px',
+            borderRadius: '12px',
+            background: 'linear-gradient(135deg, #f59e0b 0%, #d97706 100%)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+          }}>
+            <IonIcon icon={documentOutline} style={{ fontSize: '24px', color: 'white' }} />
+          </div>
+          <div>
+            <h3 style={{ color: '#0f172a', margin: '0 0 4px 0', fontSize: '15px', fontWeight: '600' }}>
+              A4 Paper Reference
+            </h3>
+            <p style={{ color: '#64748b', fontSize: '12px', margin: 0 }}>
+              Standard size: 21.0 x 29.7 cm
+            </p>
+          </div>
+        </div>
+        <p style={{ color: '#64748b', fontSize: '13px', margin: 0, lineHeight: '1.5' }}>
+          Place objects on A4 paper. The app detects the paper edges and calculates accurate measurements.
         </p>
       </div>
 
@@ -565,14 +541,14 @@ const HomePage: React.FC = () => {
         boxShadow: '0 8px 24px rgba(0,0,0,0.06)',
       }}>
         <h3 style={{ color: '#0f172a', margin: '0 0 12px 0', fontSize: '15px', fontWeight: '600' }}>
-          How to get accurate measurements
+          How to measure
         </h3>
         <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
           {[
-            { num: '1', text: 'Place reference object next to items' },
-            { num: '2', text: 'Start live measurement mode' },
-            { num: '3', text: 'Hold phone ~30cm away, parallel to surface' },
-            { num: '4', text: 'Wait for "Calibrated" status' },
+            { num: '1', text: 'Place A4 paper on flat surface' },
+            { num: '2', text: 'Put objects ON the A4 paper' },
+            { num: '3', text: 'Start measuring mode' },
+            { num: '4', text: 'Hold phone ~30cm above, parallel' },
           ].map((step) => (
             <div key={step.num} style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
               <div style={{
@@ -755,7 +731,7 @@ const HomePage: React.FC = () => {
           <IonTitle>
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
               <IonIcon icon={resizeOutline} />
-              {isLiveMode ? 'Live Measurement' : '3D Measure'}
+              {isLiveMode ? 'Measuring...' : 'Object Measure'}
             </div>
           </IonTitle>
         </IonToolbar>
