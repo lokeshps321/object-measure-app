@@ -1,6 +1,6 @@
 /**
  * API configuration and service functions
- * Supports both legacy (v1) and real-time (v2) measurement APIs
+ * V3 - Reference-based calibration for accurate measurements
  */
 
 // API Base URL - Change this to your Render deployment URL in production
@@ -9,6 +9,7 @@ const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 // ============== Types ==============
 
 export type ObjectType = '2D' | '3D';
+export type ReferenceType = 'credit_card' | 'a4_paper' | 'custom' | 'none';
 
 export interface MeasuredObject {
   width_cm: number;
@@ -38,6 +39,14 @@ export interface MeasuredObject3D {
   depth_value: number;
 }
 
+export interface CalibrationInfo {
+  reference_detected: boolean;
+  reference_type: ReferenceType;
+  pixels_per_cm: number;
+  reference_width_cm: number | null;
+  reference_height_cm: number | null;
+}
+
 export interface RealtimeMeasurementResponse {
   success: boolean;
   message: string;
@@ -46,6 +55,7 @@ export interface RealtimeMeasurementResponse {
   frame_height: number;
   processing_time_ms: number;
   annotated_image: string | null;
+  calibration_info: CalibrationInfo | null;
 }
 
 export interface RealtimeMeasurementRequest {
@@ -82,14 +92,14 @@ export async function measureImage(imageBase64: string): Promise<MeasurementResp
   return response.json();
 }
 
-// ============== New v2 API (Real-time AI) ==============
+// ============== New v2 API (Real-time with Reference Calibration) ==============
 
 /**
- * Real-time measurement with AI depth estimation
+ * Real-time measurement with automatic reference calibration
  * Supports both 2D and 3D objects
  * @param imageBase64 - Base64 encoded image
  * @param options - Optional configuration
- * @returns Real-time measurement results with 2D/3D dimensions
+ * @returns Real-time measurement results with 2D/3D dimensions and calibration info
  */
 export async function measureRealtime(
   imageBase64: string,
@@ -121,13 +131,17 @@ export async function measureRealtime(
 }
 
 /**
- * Calibrate the measurement system
+ * Configure the measurement calibration
+ * @param referenceType - Type of reference object (credit_card, a4_paper, custom)
  * @param distanceCm - Distance from camera to objects in cm
+ * @param customWidth - Custom reference width (for custom type)
+ * @param customHeight - Custom reference height (for custom type)
  */
 export async function calibrateMeasurement(
-  distanceCm: number,
-  referenceWidth?: number,
-  referenceHeight?: number
+  referenceType: ReferenceType = 'credit_card',
+  distanceCm: number = 30,
+  customWidth?: number,
+  customHeight?: number
 ): Promise<{ success: boolean; message: string; scale_factor: number }> {
   const response = await fetch(`${API_BASE_URL}/api/v2/calibrate`, {
     method: 'POST',
@@ -135,9 +149,10 @@ export async function calibrateMeasurement(
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({
+      reference_type: referenceType,
       reference_distance_cm: distanceCm,
-      reference_object_width_cm: referenceWidth,
-      reference_object_height_cm: referenceHeight,
+      reference_object_width_cm: customWidth,
+      reference_object_height_cm: customHeight,
     }),
   });
 
@@ -149,7 +164,7 @@ export async function calibrateMeasurement(
 }
 
 /**
- * Warm up the backend models for faster first inference
+ * Warm up the backend processor for faster first inference
  */
 export async function warmupModels(): Promise<{ success: boolean; message: string }> {
   try {
@@ -163,18 +178,34 @@ export async function warmupModels(): Promise<{ success: boolean; message: strin
 }
 
 /**
- * Get API status
+ * Get API status including calibration info
  */
 export async function getApiStatus(): Promise<{
   ready: boolean;
   models_loaded: boolean;
   device: string;
+  method: string;
+  calibration: {
+    reference_type: ReferenceType;
+    default_pixels_per_cm: number;
+  };
+  supported_references: Array<{ type: string; size: string }>;
 }> {
   try {
     const response = await fetch(`${API_BASE_URL}/api/v2/status`);
     return response.json();
   } catch {
-    return { ready: false, models_loaded: false, device: 'unknown' };
+    return {
+      ready: false,
+      models_loaded: false,
+      device: 'unknown',
+      method: 'unknown',
+      calibration: {
+        reference_type: 'none',
+        default_pixels_per_cm: 0,
+      },
+      supported_references: [],
+    };
   }
 }
 

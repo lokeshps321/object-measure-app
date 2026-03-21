@@ -1,6 +1,6 @@
 """
 API route handlers for real-time measurement endpoints
-Supports both 2D and 3D object measurement (Lightweight OpenCV version)
+Supports both 2D and 3D object measurement with reference calibration
 """
 
 import cv2
@@ -16,8 +16,10 @@ from app.models.schemas import (
     MeasuredObject3DResponse,
     CalibrationRequest,
     CalibrationResponse,
+    CalibrationInfo,
     ErrorResponse,
     ObjectType,
+    ReferenceType,
 )
 
 logger = logging.getLogger(__name__)
@@ -34,7 +36,7 @@ def get_processor():
     if _processor is None:
         from app.utils.realtime_processor import RealtimeProcessor
 
-        _processor = RealtimeProcessor(confidence_threshold=0.4)
+        _processor = RealtimeProcessor(confidence_threshold=0.35)
     return _processor
 
 
@@ -47,23 +49,25 @@ def get_processor():
     },
     summary="Real-time object measurement (2D/3D)",
     description="""
-    Measure objects in real-time from camera frames.
+    Measure objects in real-time from camera frames with automatic calibration.
+    
+    **For accurate measurements:**
+    1. Place a credit card (or A4 paper) next to objects
+    2. The system auto-detects the reference and calibrates
+    3. All objects in frame are measured accurately
+    
+    **Without reference:**
+    - Measurements are estimates based on camera distance
+    - Add calibration_distance_cm for better estimates
     
     **Features:**
     - Automatic 2D vs 3D object detection
-    - 2D objects: Returns Length and Breadth
-    - 3D objects: Returns Length, Breadth, and Height
-    - Uses OpenCV for fast processing
-    - Works with any camera
-    
-    **For best results:**
-    - Good lighting conditions
-    - Plain/contrasting background
-    - Objects should be clearly visible
-    - Hold camera ~30cm from objects
+    - Reference object auto-detection (credit card/A4)
+    - Real-time calibration for accurate measurements
     
     **Returns:**
     - List of measured objects with dimensions in centimeters
+    - Calibration info showing accuracy status
     - Annotated image with measurements drawn
     """,
 )
@@ -99,7 +103,7 @@ async def measure_realtime(request: RealtimeMeasurementRequest):
         # Get processor and process frame
         processor = get_processor()
 
-        # Apply calibration if provided
+        # Apply manual calibration if distance provided
         if request.calibration_distance_cm:
             processor.calibrate(reference_distance_cm=request.calibration_distance_cm)
 
@@ -125,6 +129,19 @@ async def measure_realtime(request: RealtimeMeasurementRequest):
             for obj in result.objects
         ]
 
+        # Build calibration info
+        calibration_info = None
+        if result.calibration_info:
+            calibration_info = CalibrationInfo(
+                reference_detected=result.calibration_info.get(
+                    "reference_detected", False
+                ),
+                reference_type=result.calibration_info.get("reference_type", "none"),
+                pixels_per_cm=result.calibration_info.get("pixels_per_cm", 0),
+                reference_width_cm=result.calibration_info.get("reference_width_cm"),
+                reference_height_cm=result.calibration_info.get("reference_height_cm"),
+            )
+
         return RealtimeMeasurementResponse(
             success=result.success,
             message=result.message,
@@ -133,6 +150,7 @@ async def measure_realtime(request: RealtimeMeasurementRequest):
             frame_height=result.frame_height,
             processing_time_ms=result.processing_time_ms,
             annotated_image=result.annotated_image_base64,
+            calibration_info=calibration_info,
         )
 
     except HTTPException:
@@ -145,32 +163,49 @@ async def measure_realtime(request: RealtimeMeasurementRequest):
 @router.post(
     "/calibrate",
     response_model=CalibrationResponse,
-    summary="Calibrate measurement system",
+    summary="Configure measurement calibration",
     description="""
-    Calibrate the measurement system with known reference values.
+    Configure the measurement system calibration settings.
     
-    Provide the distance from camera to objects for more accurate measurements.
+    **Reference Types:**
+    - `credit_card`: Standard credit card (8.56 x 5.398 cm) - Most common
+    - `a4_paper`: A4 paper sheet (21.0 x 29.7 cm) - For larger objects
+    - `custom`: Specify your own reference dimensions
+    
+    **Usage:**
+    1. Call this endpoint to set reference type
+    2. Place reference object in frame with objects to measure
+    3. System auto-detects reference and calibrates
     """,
 )
 async def calibrate_measurement(request: CalibrationRequest):
-    """Calibrate the measurement system"""
+    """Configure the measurement calibration"""
 
     try:
         processor = get_processor()
 
-        scale_factor = 1.0
-        if request.reference_object_width_cm:
-            scale_factor = request.reference_object_width_cm / 10.0  # Simple scaling
+        # Convert reference type
+        ref_type = (
+            request.reference_type.value if request.reference_type else "credit_card"
+        )
 
+        # Set calibration
         processor.calibrate(
             reference_distance_cm=request.reference_distance_cm,
-            scale_factor=scale_factor,
+            scale_factor=1.0,
+            reference_type=ref_type,
+            reference_width_cm=request.reference_object_width_cm,
+            reference_height_cm=request.reference_object_height_cm,
         )
+
+        message = f"Calibration configured: reference={ref_type}"
+        if request.reference_type == ReferenceType.CUSTOM:
+            message += f" ({request.reference_object_width_cm}x{request.reference_object_height_cm}cm)"
 
         return CalibrationResponse(
             success=True,
-            message=f"Calibration set: distance={request.reference_distance_cm}cm",
-            scale_factor=scale_factor,
+            message=message,
+            scale_factor=1.0,
         )
 
     except Exception as e:
@@ -181,7 +216,7 @@ async def calibrate_measurement(request: CalibrationRequest):
 @router.get(
     "/status",
     summary="Get processor status",
-    description="Check if processor is ready",
+    description="Check processor status and current calibration settings",
 )
 async def get_status():
     """Get current processor status"""
@@ -193,12 +228,17 @@ async def get_status():
             "ready": True,
             "models_loaded": processor._models_loaded,
             "device": "cpu",
-            "depth_model": "opencv_contour",
+            "method": "opencv_reference_calibration",
             "confidence_threshold": processor.confidence_threshold,
             "calibration": {
-                "reference_distance_cm": processor.REFERENCE_DISTANCE_CM,
-                "scale_factor": processor._scale_factor,
+                "reference_type": processor._reference_type.value,
+                "default_pixels_per_cm": round(processor._default_pixels_per_cm, 2),
             },
+            "supported_references": [
+                {"type": "credit_card", "size": "8.56 x 5.398 cm"},
+                {"type": "a4_paper", "size": "21.0 x 29.7 cm"},
+                {"type": "custom", "size": "user-defined"},
+            ],
         }
 
     except Exception as e:
@@ -221,6 +261,7 @@ async def warmup_models():
 
         # Add some test shapes
         cv2.rectangle(dummy_image, (100, 100), (300, 300), (255, 255, 255), -1)
+        cv2.rectangle(dummy_image, (350, 150), (450, 250), (200, 200, 200), -1)
 
         # Process to warm up
         processor.process_frame(dummy_image, return_annotated=False)

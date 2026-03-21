@@ -12,6 +12,9 @@ import {
   IonSpinner,
   IonChip,
   IonFabButton,
+  IonSegment,
+  IonSegmentButton,
+  IonLabel,
 } from '@ionic/react';
 import {
   camera,
@@ -23,14 +26,21 @@ import {
   squareOutline,
   resizeOutline,
   close,
+  cardOutline,
+  documentOutline,
+  checkmark,
+  warning,
 } from 'ionicons/icons';
 import { CameraPreview, CameraPreviewOptions } from '@capacitor-community/camera-preview';
 import {
   measureRealtime,
   RealtimeMeasurementResponse,
   MeasuredObject3D,
+  CalibrationInfo,
+  ReferenceType,
   checkHealth,
   warmupModels,
+  calibrateMeasurement,
 } from '../services/api';
 
 const HomePage: React.FC = () => {
@@ -45,6 +55,8 @@ const HomePage: React.FC = () => {
   const [apiReady, setApiReady] = useState(false);
   const [capturedImage, setCapturedImage] = useState<string | null>(null);
   const [liveResults, setLiveResults] = useState<MeasuredObject3D[]>([]);
+  const [calibrationInfo, setCalibrationInfo] = useState<CalibrationInfo | null>(null);
+  const [referenceType, setReferenceType] = useState<ReferenceType>('credit_card');
   
   const liveIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const isCapturingRef = useRef(false);
@@ -57,13 +69,14 @@ const HomePage: React.FC = () => {
       setApiReady(healthy);
       
       if (healthy) {
-        // Warm up the AI models
+        // Warm up the processor
         setIsWarmingUp(true);
         try {
-          const warmupResult = await warmupModels();
-          console.log('Models warmup:', warmupResult);
+          await warmupModels();
+          // Set default calibration
+          await calibrateMeasurement(referenceType);
         } catch (e) {
-          console.log('Model warmup failed:', e);
+          console.log('Warmup failed:', e);
         }
         setIsWarmingUp(false);
       }
@@ -76,6 +89,16 @@ const HomePage: React.FC = () => {
       stopLiveMode();
     };
   }, []);
+
+  // Handle reference type change
+  const handleReferenceChange = async (newType: ReferenceType) => {
+    setReferenceType(newType);
+    try {
+      await calibrateMeasurement(newType);
+    } catch (e) {
+      console.log('Calibration update failed:', e);
+    }
+  };
 
   // Start live camera preview
   const startLiveMode = async () => {
@@ -99,13 +122,14 @@ const HomePage: React.FC = () => {
       setErrorMessage(null);
       setCapturedImage(null);
       setLiveResults([]);
+      setCalibrationInfo(null);
       
-      // Start continuous capture every 2 seconds
+      // Start continuous capture every 1.5 seconds
       liveIntervalRef.current = setInterval(async () => {
         if (!isCapturingRef.current) {
           await captureAndProcess();
         }
-      }, 2000);
+      }, 1500);
       
     } catch (error) {
       console.error('Failed to start camera:', error);
@@ -140,13 +164,13 @@ const HomePage: React.FC = () => {
       });
       
       if (result.value) {
-        // Process the captured image
         const response: RealtimeMeasurementResponse = await measureRealtime(result.value, {
-          returnAnnotated: false, // Don't need annotated for live mode
+          returnAnnotated: false,
         });
         
-        if (response.success && response.objects.length > 0) {
+        if (response.success) {
           setLiveResults(response.objects);
+          setCalibrationInfo(response.calibration_info);
           setErrorMessage(null);
         } else {
           setLiveResults([]);
@@ -179,6 +203,7 @@ const HomePage: React.FC = () => {
         });
         
         setProcessingTime(response.processing_time_ms || (Date.now() - startTime));
+        setCalibrationInfo(response.calibration_info);
         
         if (response.success && response.objects.length > 0) {
           setMeasurements(response.objects);
@@ -207,7 +232,73 @@ const HomePage: React.FC = () => {
     setErrorMessage(null);
     setCapturedImage(null);
     setLiveResults([]);
+    setCalibrationInfo(null);
   }, []);
+
+  // Render calibration status badge
+  const renderCalibrationBadge = (info: CalibrationInfo | null, compact: boolean = false) => {
+    if (!info) return null;
+    
+    const isCalibrated = info.reference_detected;
+    
+    if (compact) {
+      return (
+        <div style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: '6px',
+          padding: '4px 10px',
+          background: isCalibrated ? 'rgba(16, 185, 129, 0.9)' : 'rgba(245, 158, 11, 0.9)',
+          borderRadius: '16px',
+          fontSize: '12px',
+          color: 'white',
+        }}>
+          <IonIcon icon={isCalibrated ? checkmark : warning} />
+          {isCalibrated ? 'Calibrated' : 'No Reference'}
+        </div>
+      );
+    }
+    
+    return (
+      <div style={{
+        background: isCalibrated ? 'rgba(16, 185, 129, 0.1)' : 'rgba(245, 158, 11, 0.1)',
+        border: `1px solid ${isCalibrated ? '#10b981' : '#f59e0b'}`,
+        borderRadius: '12px',
+        padding: '12px',
+        marginBottom: '12px',
+      }}>
+        <div style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: '8px',
+          marginBottom: '6px',
+        }}>
+          <IonIcon 
+            icon={isCalibrated ? checkmarkCircle : alertCircle} 
+            style={{ color: isCalibrated ? '#10b981' : '#f59e0b', fontSize: '20px' }} 
+          />
+          <span style={{ 
+            fontWeight: '600', 
+            color: isCalibrated ? '#059669' : '#d97706',
+            fontSize: '14px',
+          }}>
+            {isCalibrated ? 'Reference Detected' : 'No Reference Found'}
+          </span>
+        </div>
+        <p style={{ 
+          margin: 0, 
+          fontSize: '12px', 
+          color: '#64748b',
+          lineHeight: '1.4',
+        }}>
+          {isCalibrated 
+            ? `Using ${info.reference_type.replace('_', ' ')} (${info.pixels_per_cm.toFixed(1)} px/cm)`
+            : 'Place a credit card or A4 paper next to objects for accurate measurements'
+          }
+        </p>
+      </div>
+    );
+  };
 
   // Render measurement card
   const renderMeasurementCard = (obj: MeasuredObject3D, index: number) => {
@@ -271,13 +362,26 @@ const HomePage: React.FC = () => {
       bottom: 0,
       left: 0,
       right: 0,
-      background: 'linear-gradient(transparent, rgba(0,0,0,0.8))',
+      background: 'linear-gradient(transparent, rgba(0,0,0,0.85))',
       padding: '20px',
       zIndex: 100,
     }}>
+      {/* Calibration status */}
+      <div style={{ 
+        display: 'flex', 
+        justifyContent: 'space-between', 
+        alignItems: 'center',
+        marginBottom: '12px',
+      }}>
+        <span style={{ color: 'white', fontSize: '12px', opacity: 0.8 }}>
+          Reference: {referenceType.replace('_', ' ')}
+        </span>
+        {renderCalibrationBadge(calibrationInfo, true)}
+      </div>
+      
       {/* Live measurements */}
       {liveResults.length > 0 && (
-        <div style={{ marginBottom: '16px' }}>
+        <div style={{ marginBottom: '16px', maxHeight: '200px', overflowY: 'auto' }}>
           {liveResults.map((obj, idx) => (
             <div key={idx} style={{
               background: obj.object_type === '3D' ? 'rgba(16, 185, 129, 0.9)' : 'rgba(59, 130, 246, 0.9)',
@@ -304,9 +408,16 @@ const HomePage: React.FC = () => {
       )}
       
       {liveResults.length === 0 && (
-        <p style={{ color: 'white', textAlign: 'center', marginBottom: '16px', opacity: 0.8 }}>
-          Point camera at an object...
-        </p>
+        <div style={{ textAlign: 'center', marginBottom: '16px' }}>
+          <p style={{ color: 'white', margin: '0 0 8px 0', opacity: 0.9 }}>
+            Point camera at objects to measure
+          </p>
+          {!calibrationInfo?.reference_detected && (
+            <p style={{ color: '#fbbf24', margin: 0, fontSize: '12px' }}>
+              Add a credit card for accurate measurements
+            </p>
+          )}
+        </div>
       )}
       
       {/* Capture button */}
@@ -346,39 +457,39 @@ const HomePage: React.FC = () => {
         alignItems: 'center',
         justifyContent: 'center',
         textAlign: 'center',
-        padding: '30px 20px',
+        padding: '20px',
       }}>
         <div style={{
-          width: '100px',
-          height: '100px',
-          borderRadius: '25px',
+          width: '90px',
+          height: '90px',
+          borderRadius: '22px',
           background: 'linear-gradient(135deg, #3b82f6 0%, #1d4ed8 100%)',
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'center',
-          marginBottom: '24px',
+          marginBottom: '20px',
           boxShadow: '0 15px 30px rgba(59, 130, 246, 0.3)',
         }}>
-          <IonIcon icon={resizeOutline} style={{ fontSize: '50px', color: 'white' }} />
+          <IonIcon icon={resizeOutline} style={{ fontSize: '45px', color: 'white' }} />
         </div>
         
         <h1 style={{
           color: '#0f172a',
-          fontSize: '28px',
+          fontSize: '26px',
           fontWeight: '700',
-          margin: '0 0 10px 0',
+          margin: '0 0 8px 0',
         }}>
           3D Object Measure
         </h1>
         
         <p style={{
           color: '#475569',
-          fontSize: '15px',
+          fontSize: '14px',
           margin: '0 0 16px 0',
           maxWidth: '280px',
           lineHeight: '1.5',
         }}>
-          Real-time 2D/3D object measurement with AI
+          Accurate 2D/3D measurements with reference calibration
         </p>
 
         {/* API Status */}
@@ -389,7 +500,7 @@ const HomePage: React.FC = () => {
           padding: '8px 16px',
           background: apiReady ? 'rgba(16, 185, 129, 0.1)' : 'rgba(239, 68, 68, 0.1)',
           borderRadius: '20px',
-          marginBottom: '20px',
+          marginBottom: '16px',
         }}>
           <div style={{
             width: '8px',
@@ -398,46 +509,88 @@ const HomePage: React.FC = () => {
             background: apiReady ? '#10b981' : '#ef4444',
           }} />
           <span style={{ fontSize: '13px', color: apiReady ? '#059669' : '#dc2626' }}>
-            {isWarmingUp ? 'Loading AI models...' : (apiReady ? 'AI Ready' : 'Connecting...')}
+            {isWarmingUp ? 'Initializing...' : (apiReady ? 'Ready' : 'Connecting...')}
           </span>
         </div>
+      </div>
+
+      {/* Reference Selection */}
+      <div style={{
+        background: 'white',
+        borderRadius: '20px',
+        padding: '16px',
+        marginBottom: '16px',
+        boxShadow: '0 8px 24px rgba(0,0,0,0.06)',
+      }}>
+        <h3 style={{ color: '#0f172a', margin: '0 0 12px 0', fontSize: '15px', fontWeight: '600' }}>
+          Reference Object
+        </h3>
+        <p style={{ color: '#64748b', fontSize: '12px', margin: '0 0 12px 0' }}>
+          Place this next to objects for accurate measurements
+        </p>
+        
+        <IonSegment 
+          value={referenceType} 
+          onIonChange={(e) => handleReferenceChange(e.detail.value as ReferenceType)}
+          style={{ '--background': '#f1f5f9' }}
+        >
+          <IonSegmentButton value="credit_card">
+            <IonIcon icon={cardOutline} />
+            <IonLabel style={{ fontSize: '11px' }}>Credit Card</IonLabel>
+          </IonSegmentButton>
+          <IonSegmentButton value="a4_paper">
+            <IonIcon icon={documentOutline} />
+            <IonLabel style={{ fontSize: '11px' }}>A4 Paper</IonLabel>
+          </IonSegmentButton>
+        </IonSegment>
+        
+        <p style={{ 
+          color: '#94a3b8', 
+          fontSize: '11px', 
+          margin: '10px 0 0 0',
+          textAlign: 'center',
+        }}>
+          {referenceType === 'credit_card' 
+            ? 'Standard card: 8.56 x 5.4 cm' 
+            : 'A4 paper: 21.0 x 29.7 cm'}
+        </p>
       </div>
 
       {/* Instructions Card */}
       <div style={{
         background: 'white',
         borderRadius: '20px',
-        padding: '20px',
-        marginBottom: '20px',
+        padding: '16px',
+        marginBottom: '16px',
         boxShadow: '0 8px 24px rgba(0,0,0,0.06)',
       }}>
-        <h3 style={{ color: '#0f172a', margin: '0 0 14px 0', fontSize: '16px', fontWeight: '600' }}>
-          How to use
+        <h3 style={{ color: '#0f172a', margin: '0 0 12px 0', fontSize: '15px', fontWeight: '600' }}>
+          How to get accurate measurements
         </h3>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
           {[
-            { num: '1', text: 'Start live measurement mode' },
-            { num: '2', text: 'Point camera at any object' },
-            { num: '3', text: 'See real-time 2D/3D measurements' },
-            { num: '4', text: 'Tap capture to save result' },
+            { num: '1', text: 'Place reference object next to items' },
+            { num: '2', text: 'Start live measurement mode' },
+            { num: '3', text: 'Hold phone ~30cm away, parallel to surface' },
+            { num: '4', text: 'Wait for "Calibrated" status' },
           ].map((step) => (
-            <div key={step.num} style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+            <div key={step.num} style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
               <div style={{
-                width: '28px',
-                height: '28px',
+                width: '24px',
+                height: '24px',
                 borderRadius: '50%',
                 background: '#3b82f6',
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'center',
                 color: 'white',
-                fontSize: '14px',
+                fontSize: '12px',
                 fontWeight: '600',
                 flexShrink: 0,
               }}>
                 {step.num}
               </div>
-              <span style={{ color: '#334155', fontSize: '14px' }}>
+              <span style={{ color: '#334155', fontSize: '13px' }}>
                 {step.text}
               </span>
             </div>
@@ -457,13 +610,13 @@ const HomePage: React.FC = () => {
             '--color': '#ffffff',
             '--border-radius': '14px',
             '--box-shadow': '0 8px 20px rgba(16, 185, 129, 0.3)',
-            height: '60px',
-            fontSize: '18px',
+            height: '56px',
+            fontSize: '17px',
             fontWeight: '600',
           }}
         >
-          <IonIcon slot="start" icon={videocam} style={{ fontSize: '24px' }} />
-          {isWarmingUp ? 'Loading AI...' : 'Start Live Measurement'}
+          <IonIcon slot="start" icon={videocam} style={{ fontSize: '22px' }} />
+          {isWarmingUp ? 'Initializing...' : 'Start Measuring'}
         </IonButton>
       </div>
     </div>
@@ -486,6 +639,9 @@ const HomePage: React.FC = () => {
           />
         </IonCard>
       )}
+
+      {/* Calibration Info */}
+      {renderCalibrationBadge(calibrationInfo)}
 
       {/* Measurements */}
       {measurements.length > 0 && (

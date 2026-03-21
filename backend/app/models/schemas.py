@@ -111,6 +111,24 @@ class MeasuredObject3DResponse(BaseModel):
         }
 
 
+class CalibrationInfo(BaseModel):
+    """Calibration information"""
+
+    reference_detected: bool = Field(
+        ..., description="Whether reference object was detected"
+    )
+    reference_type: str = Field(
+        ..., description="Type of reference (credit_card, a4_paper, custom, none)"
+    )
+    pixels_per_cm: float = Field(..., description="Calculated pixels per centimeter")
+    reference_width_cm: Optional[float] = Field(
+        None, description="Reference object width"
+    )
+    reference_height_cm: Optional[float] = Field(
+        None, description="Reference object height"
+    )
+
+
 class RealtimeMeasurementResponse(BaseModel):
     """Response from real-time measurement endpoint"""
 
@@ -126,6 +144,9 @@ class RealtimeMeasurementResponse(BaseModel):
     )
     annotated_image: Optional[str] = Field(
         None, description="Base64 encoded annotated image"
+    )
+    calibration_info: Optional[CalibrationInfo] = Field(
+        None, description="Calibration information"
     )
 
     class Config:
@@ -188,25 +209,36 @@ class RealtimeMeasurementRequest(BaseModel):
         }
 
 
+class ReferenceType(str, Enum):
+    """Type of reference object for calibration"""
+
+    CREDIT_CARD = "credit_card"
+    A4_PAPER = "a4_paper"
+    CUSTOM = "custom"
+    NONE = "none"
+
+
 class CalibrationRequest(BaseModel):
     """Request to calibrate measurement system"""
 
+    reference_type: ReferenceType = Field(
+        default=ReferenceType.CREDIT_CARD, description="Type of reference object"
+    )
     reference_distance_cm: float = Field(
-        default=100.0, description="Distance from camera to reference object"
+        default=30.0, description="Distance from camera to reference object"
     )
     reference_object_width_cm: Optional[float] = Field(
-        None, description="Known width of reference object"
+        None, description="Custom reference width (only for custom type)"
     )
     reference_object_height_cm: Optional[float] = Field(
-        None, description="Known height of reference object"
+        None, description="Custom reference height (only for custom type)"
     )
 
     class Config:
         json_schema_extra = {
             "example": {
-                "reference_distance_cm": 100.0,
-                "reference_object_width_cm": 21.0,
-                "reference_object_height_cm": 29.7,
+                "reference_type": "credit_card",
+                "reference_distance_cm": 30.0,
             }
         }
 
