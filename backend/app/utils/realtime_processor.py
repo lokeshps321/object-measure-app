@@ -200,20 +200,31 @@ class RealtimeProcessor:
                             )
                             ratio_tolerance = 0.3
 
-                        if abs(aspect_ratio - expected_ratio) < ratio_tolerance:
-                            # Score based on rectangularity and size
+                        ratio_diff = abs(aspect_ratio - expected_ratio)
+                        if ratio_diff < ratio_tolerance:
+                            # Score based on rectangularity and aspect ratio match
                             hull = cv2.convexHull(contour)
                             hull_area = cv2.contourArea(hull)
                             solidity = area / hull_area if hull_area > 0 else 0
 
+                            # Prefer smaller rectangles that match reference size
+                            # Credit card at typical distances: 5-20% of image area
+                            # A4 paper: 10-40% of image area
+                            if self._reference_type == ReferenceType.CREDIT_CARD:
+                                ideal_area_ratio = 0.08  # ~8% of image
+                                area_tolerance = 0.15
+                            else:  # A4 or custom
+                                ideal_area_ratio = 0.25  # ~25% of image
+                                area_tolerance = 0.25
+
+                            area_ratio = area / (width * height)
+                            area_diff = abs(area_ratio - ideal_area_ratio)
+                            area_score = max(0, 1 - area_diff / area_tolerance)
+
+                            # Combined score: rectangularity + aspect ratio match + size match
+                            ratio_score = 1 - ratio_diff / ratio_tolerance
                             score = (
-                                solidity
-                                * (area / max_area)
-                                * (
-                                    1
-                                    - abs(aspect_ratio - expected_ratio)
-                                    / ratio_tolerance
-                                )
+                                solidity * 0.3 + ratio_score * 0.4 + area_score * 0.3
                             )
 
                             if score > best_score:
@@ -228,7 +239,7 @@ class RealtimeProcessor:
         """
         ref_points, confidence = self._detect_reference_object(image)
 
-        if ref_points is not None and confidence > 0.3:
+        if ref_points is not None and confidence > 0.2:
             # Get reference size
             if self._reference_type == ReferenceType.CUSTOM:
                 ref_width_cm, ref_height_cm = self._custom_reference_size
@@ -377,7 +388,7 @@ class RealtimeProcessor:
             # Get rotated rectangle for more accurate dimensions
             rect = cv2.minAreaRect(contour)
             box = cv2.boxPoints(rect)
-            box = np.int0(box)
+            box = np.intp(box)
 
             # Dimensions from rotated rect
             rect_w, rect_h = rect[1]
