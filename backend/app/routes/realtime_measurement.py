@@ -227,16 +227,14 @@ async def get_status():
             "ready": True,
             "models_loaded": processor._models_loaded,
             "device": "cpu",
-            "method": "opencv_reference_calibration",
+            "method": "opencv_a4_calibration",
             "confidence_threshold": processor.confidence_threshold,
             "calibration": {
-                "reference_type": processor._reference_type.value,
+                "reference_type": "a4_paper",
                 "default_pixels_per_cm": round(processor._default_pixels_per_cm, 2),
             },
             "supported_references": [
-                {"type": "credit_card", "size": "8.56 x 5.398 cm"},
                 {"type": "a4_paper", "size": "21.0 x 29.7 cm"},
-                {"type": "custom", "size": "user-defined"},
             ],
         }
 
