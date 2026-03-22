@@ -240,15 +240,11 @@ def measure_objects_local(
     scored = []
     for contour in all_contours[:50]:
         area = cv2.contourArea(contour)
-        if area < min_area or area > max_area:
+        if area < min_area or area > w * h * 0.99:  # Accept almost full frame objects at 15cm
             continue
         x, y, bw, bh = cv2.boundingRect(contour)
-        # Reject contours touching image edges (likely background)
-        edge_margin = 5
-        if x <= edge_margin or y <= edge_margin or x+bw >= w-edge_margin or y+bh >= h-edge_margin:
-            continue
         aspect = max(bw, bh) / max(1, min(bw, bh))
-        if aspect > 10:
+        if aspect > 15:
             continue
         # Distance of contour center from image center (normalized)
         cx_c, cy_c = x + bw//2, y + bh//2
