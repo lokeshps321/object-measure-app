@@ -23,6 +23,7 @@ export interface MeasurementResponse {
   reference_detected: boolean;
   objects: MeasuredObject[];
   processed_image: string | null;
+  processed_side_image: string | null;
   mode: string;
   calibration_info: Record<string, unknown> | null;
 }
@@ -37,18 +38,24 @@ export interface ApiError {
 export async function measureImage(
   imageBase64: string,
   mode: string = '2d',
-  cameraDistanceCm: number = 30
+  cameraDistanceCm: number = 30,
+  sideImageBase64?: string,
+  sideCameraDistanceCm?: number
 ): Promise<MeasurementResponse> {
+  const payload = {
+    image: imageBase64,
+    mode: mode,
+    camera_distance_cm: cameraDistanceCm,
+    side_image: sideImageBase64,
+    side_camera_distance_cm: sideCameraDistanceCm
+  };
+
   const response = await fetch(`${API_BASE_URL}/api/v1/measure/base64`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify({
-      image: imageBase64,
-      mode: mode,
-      camera_distance_cm: cameraDistanceCm,
-    }),
+    body: JSON.stringify(payload),
   });
 
   if (!response.ok) {

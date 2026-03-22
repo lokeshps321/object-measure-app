@@ -33,10 +33,13 @@ const HomePage: React.FC = () => {
   const [loadingText, setLoadingText] = useState('Processing...');
   const [capturedImage, setCapturedImage] = useState<string | null>(null);
   const [resultImage, setResultImage] = useState<string | null>(null);
+  const [resultSideImage, setResultSideImage] = useState<string | null>(null);
   const [measurements, setMeasurements] = useState<MeasuredObject[]>([]);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [mode, setMode] = useState<'2d' | '3d'>('2d');
   const [cameraDistance, setCameraDistance] = useState(30);
+  const [topImageData, setTopImageData] = useState<{base64String: string, dataUrl: string} | null>(null);
+  const [sideCameraDistance, setSideCameraDistance] = useState(30);
   const [apiReady, setApiReady] = useState(false);
   
   const [presentToast] = useIonToast();
@@ -53,7 +56,7 @@ const HomePage: React.FC = () => {
     return () => clearInterval(interval);
   }, []);
 
-  const showToast = useCallback((message: string, color: 'success' | 'danger' | 'warning' = 'success') => {
+  const showToast = useCallback((message: string, color: 'success' | 'danger' | 'warning' | 'primary' = 'success') => {
     presentToast({
       message,
       duration: 3000,
@@ -62,22 +65,31 @@ const HomePage: React.FC = () => {
     });
   }, [presentToast]);
 
-  const processImage = useCallback(async (base64String: string, dataUrl: string) => {
+  const processDualImage = useCallback(async (base64String: string, dataUrl: string) => {
     setIsLoading(true);
-    setLoadingText(mode === '3d' ? 'AI analyzing depth...' : 'Detecting objects...');
+    setLoadingText(mode === '3d' ? 'Computing true 3D measurements...' : 'Measuring objects...');
     setErrorMessage(null);
-    setCapturedImage(dataUrl);
+    setCapturedImage(topImageData ? topImageData.dataUrl : dataUrl);
     setResultImage(null);
+    setResultSideImage(null);
     setMeasurements([]);
 
     try {
-      setLoadingText(mode === '3d' ? 'Computing 3D measurements...' : 'Measuring objects...');
-      const result: MeasurementResponse = await measureImage(base64String, mode, cameraDistance);
+      let finalTop = topImageData ? topImageData.base64String : base64String;
+      let finalSide = topImageData ? base64String : undefined;
+      let finalSideDist = topImageData ? sideCameraDistance : undefined;
+
+      const result: MeasurementResponse = await measureImage(
+          finalTop, mode, cameraDistance, finalSide, finalSideDist
+      );
 
       if (result.success) {
         setMeasurements(result.objects);
         if (result.processed_image) {
           setResultImage(`data:image/jpeg;base64,${result.processed_image}`);
+        }
+        if (result.processed_side_image) {
+          setResultSideImage(`data:image/jpeg;base64,${result.processed_side_image}`);
         }
         showToast(`Found ${result.objects.length} object(s)`, result.objects.length > 0 ? 'success' : 'warning');
       } else {
@@ -90,13 +102,25 @@ const HomePage: React.FC = () => {
       showToast(message, 'danger');
     } finally {
       setIsLoading(false);
+      setTopImageData(null);
     }
-  }, [showToast, mode, cameraDistance]);
+  }, [showToast, mode, cameraDistance, topImageData, sideCameraDistance]);
+
+  const handleImageSelection = useCallback(async (image: {base64String: string, dataUrl: string}) => {
+      if (mode === '3d' && !topImageData) {
+        // Just captured top image, move to side image step
+        setTopImageData(image);
+        showToast("Top view saved! Now take a side view.", "primary");
+      } else {
+        // Either 2D mode, or Side Image
+        await processDualImage(image.base64String, image.dataUrl);
+      }
+  }, [mode, topImageData, processDualImage, showToast]);
 
   const handleCapturePhoto = useCallback(async () => {
     try {
       const image = await capturePhoto();
-      await processImage(image.base64String, image.dataUrl);
+      await handleImageSelection(image);
     } catch (error: unknown) {
       const err = error as Error;
       if (err.message && (err.message.includes('cancelled') || err.message.includes('cancel'))) {
@@ -105,12 +129,12 @@ const HomePage: React.FC = () => {
       console.error('Camera error:', error);
       showToast(err.message || 'Failed to capture photo', 'danger');
     }
-  }, [processImage, showToast]);
+  }, [handleImageSelection, showToast]);
 
   const handlePickFromGallery = useCallback(async () => {
     try {
       const image = await pickFromGallery();
-      await processImage(image.base64String, image.dataUrl);
+      await handleImageSelection(image);
     } catch (error: unknown) {
       const err = error as Error;
       if (err.message && (err.message.includes('cancelled') || err.message.includes('cancel'))) {
@@ -119,13 +143,15 @@ const HomePage: React.FC = () => {
       console.error('Gallery error:', error);
       showToast(err.message || 'Failed to load image', 'danger');
     }
-  }, [processImage, showToast]);
+  }, [handleImageSelection, showToast]);
 
   const handleReset = useCallback(() => {
     setCapturedImage(null);
     setResultImage(null);
+    setResultSideImage(null);
     setMeasurements([]);
     setErrorMessage(null);
+    setTopImageData(null);
   }, []);
 
   // Landing screen
@@ -202,59 +228,78 @@ const HomePage: React.FC = () => {
         </p>
       </div>
 
-      {/* Mode Selection */}
-      <div style={{
-        background: '#ffffff',
-        borderRadius: '20px',
-        padding: '20px',
-        marginBottom: '16px',
-        border: '1px solid #e5e7eb',
-        boxShadow: '0 4px 20px rgba(15, 23, 42, 0.06)',
-      }}>
-        <h3 style={{ color: '#0f172a', margin: '0 0 14px 0', fontSize: '16px' }}>
-          Measurement Mode
-        </h3>
-        <div style={{ display: 'flex', gap: '10px' }}>
-          <button
-            onClick={() => setMode('2d')}
-            style={{
-              flex: 1,
-              padding: '14px',
-              borderRadius: '14px',
-              border: mode === '2d' ? '2px solid #3b82f6' : '2px solid #e5e7eb',
-              background: mode === '2d' ? '#eff6ff' : '#ffffff',
-              cursor: 'pointer',
-              display: 'flex',
-              flexDirection: 'column',
-              alignItems: 'center',
-              gap: '6px',
-            }}
-          >
-            <IonIcon icon={squareOutline} style={{ fontSize: '28px', color: mode === '2d' ? '#3b82f6' : '#94a3b8' }} />
-            <span style={{ fontWeight: '600', color: mode === '2d' ? '#3b82f6' : '#64748b', fontSize: '14px' }}>2D</span>
-            <span style={{ fontSize: '11px', color: '#94a3b8' }}>L × W</span>
-          </button>
-          <button
-            onClick={() => setMode('3d')}
-            style={{
-              flex: 1,
-              padding: '14px',
-              borderRadius: '14px',
-              border: mode === '3d' ? '2px solid #22c55e' : '2px solid #e5e7eb',
-              background: mode === '3d' ? '#f0fdf4' : '#ffffff',
-              cursor: 'pointer',
-              display: 'flex',
-              flexDirection: 'column',
-              alignItems: 'center',
-              gap: '6px',
-            }}
-          >
-            <IonIcon icon={cubeOutline} style={{ fontSize: '28px', color: mode === '3d' ? '#22c55e' : '#94a3b8' }} />
-            <span style={{ fontWeight: '600', color: mode === '3d' ? '#22c55e' : '#64748b', fontSize: '14px' }}>3D</span>
-            <span style={{ fontSize: '11px', color: '#94a3b8' }}>L × W × H</span>
-          </button>
+      {/* Mode Selection or Step Information */}
+      {!topImageData ? (
+        <div style={{
+          background: '#ffffff',
+          borderRadius: '20px',
+          padding: '20px',
+          marginBottom: '16px',
+          border: '1px solid #e5e7eb',
+          boxShadow: '0 4px 20px rgba(15, 23, 42, 0.06)',
+        }}>
+          <h3 style={{ color: '#0f172a', margin: '0 0 14px 0', fontSize: '16px' }}>
+            Measurement Mode
+          </h3>
+          <div style={{ display: 'flex', gap: '10px' }}>
+            <button
+              onClick={() => setMode('2d')}
+              style={{
+                flex: 1,
+                padding: '14px',
+                borderRadius: '14px',
+                border: mode === '2d' ? '2px solid #3b82f6' : '2px solid #e5e7eb',
+                background: mode === '2d' ? '#eff6ff' : '#ffffff',
+                cursor: 'pointer',
+                display: 'flex',
+                flexDirection: 'column',
+                alignItems: 'center',
+                gap: '6px',
+              }}
+            >
+              <IonIcon icon={squareOutline} style={{ fontSize: '28px', color: mode === '2d' ? '#3b82f6' : '#94a3b8' }} />
+              <span style={{ fontWeight: '600', color: mode === '2d' ? '#3b82f6' : '#64748b', fontSize: '14px' }}>2D</span>
+              <span style={{ fontSize: '11px', color: '#94a3b8' }}>L × W</span>
+            </button>
+            <button
+              onClick={() => setMode('3d')}
+              style={{
+                flex: 1,
+                padding: '14px',
+                borderRadius: '14px',
+                border: mode === '3d' ? '2px solid #22c55e' : '2px solid #e5e7eb',
+                background: mode === '3d' ? '#f0fdf4' : '#ffffff',
+                cursor: 'pointer',
+                display: 'flex',
+                flexDirection: 'column',
+                alignItems: 'center',
+                gap: '6px',
+              }}
+            >
+              <IonIcon icon={cubeOutline} style={{ fontSize: '28px', color: mode === '3d' ? '#22c55e' : '#94a3b8' }} />
+              <span style={{ fontWeight: '600', color: mode === '3d' ? '#22c55e' : '#64748b', fontSize: '14px' }}>3D</span>
+              <span style={{ fontSize: '11px', color: '#94a3b8' }}>L × W × H</span>
+            </button>
+          </div>
         </div>
-      </div>
+      ) : (
+        <div style={{
+          background: '#dcfce7',
+          borderRadius: '20px',
+          padding: '20px',
+          marginBottom: '16px',
+          border: '1px solid #86efac',
+          boxShadow: '0 4px 20px rgba(15, 23, 42, 0.06)',
+          textAlign: 'center',
+        }}>
+          <h3 style={{ color: '#166534', margin: '0 0 8px 0', fontSize: '16px' }}>
+            Step 2: Side View (True Height)
+          </h3>
+          <p style={{ margin: 0, color: '#166534', fontSize: '14px' }}>
+            Great! Top view is saved. Now lower your camera to the side of the object.
+          </p>
+        </div>
+      )}
 
       {/* Camera Distance */}
       <div style={{
@@ -266,16 +311,16 @@ const HomePage: React.FC = () => {
         boxShadow: '0 4px 20px rgba(15, 23, 42, 0.06)',
       }}>
         <h3 style={{ color: '#0f172a', margin: '0 0 10px 0', fontSize: '16px' }}>
-          Camera Distance: {cameraDistance} cm
+          {topImageData ? 'Side View Distance' : 'Camera Distance'}: {topImageData ? sideCameraDistance : cameraDistance} cm
         </h3>
         <input
           type="range"
           min="10"
           max="100"
           step="5"
-          value={cameraDistance}
-          onChange={(e) => setCameraDistance(parseInt(e.target.value))}
-          style={{ width: '100%', accentColor: '#3b82f6' }}
+          value={topImageData ? sideCameraDistance : cameraDistance}
+          onChange={(e) => topImageData ? setSideCameraDistance(parseInt(e.target.value)) : setCameraDistance(parseInt(e.target.value))}
+          style={{ width: '100%', accentColor: topImageData ? '#22c55e' : '#3b82f6' }}
         />
         <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px', color: '#94a3b8', marginTop: '4px' }}>
           <span>10cm (close)</span>
@@ -291,7 +336,7 @@ const HomePage: React.FC = () => {
           disabled={!apiReady}
           onClick={handleCapturePhoto}
           style={{
-            '--background': '#0f172a',
+            '--background': topImageData ? '#16a34a' : '#0f172a',
             '--color': '#ffffff',
             '--border-radius': '16px',
             '--box-shadow': '0 10px 24px rgba(15, 23, 42, 0.15)',
@@ -301,27 +346,46 @@ const HomePage: React.FC = () => {
           }}
         >
           <IonIcon slot="start" icon={camera} />
-          Take Photo
+          {topImageData ? 'Capture Side View' : 'Take Photo'}
         </IonButton>
         
-        <IonButton
-          expand="block"
-          size="large"
-          fill="outline"
-          disabled={!apiReady}
-          onClick={handlePickFromGallery}
-          style={{
-            '--border-radius': '16px',
-            '--border-color': '#cbd5e1',
-            '--color': '#0f172a',
-            height: '56px',
-            fontSize: '17px',
-            fontWeight: '600',
-          }}
-        >
-          <IonIcon slot="start" icon={images} />
-          Choose from Gallery
-        </IonButton>
+        {topImageData ? (
+            <IonButton
+              expand="block"
+              size="large"
+              fill="outline"
+              onClick={() => setTopImageData(null)}
+              style={{
+                '--border-radius': '16px',
+                '--border-color': '#ef4444',
+                '--color': '#ef4444',
+                height: '56px',
+                fontSize: '17px',
+                fontWeight: '600',
+              }}
+            >
+              Cancel 3D Capture
+            </IonButton>
+        ) : (
+            <IonButton
+              expand="block"
+              size="large"
+              fill="outline"
+              disabled={!apiReady}
+              onClick={handlePickFromGallery}
+              style={{
+                '--border-radius': '16px',
+                '--border-color': '#cbd5e1',
+                '--color': '#0f172a',
+                height: '56px',
+                fontSize: '17px',
+                fontWeight: '600',
+              }}
+            >
+              <IonIcon slot="start" icon={images} />
+              Choose from Gallery
+            </IonButton>
+        )}
       </div>
     </div>
   );
@@ -329,22 +393,42 @@ const HomePage: React.FC = () => {
   // Results screen
   const renderResults = () => (
     <div style={{ padding: '16px', background: '#f5f7fb', minHeight: '100%' }}>
-      {/* Result Image */}
-      {resultImage && (
-        <IonCard style={{
-          margin: '0 0 16px 0',
-          borderRadius: '20px',
-          overflow: 'hidden',
-          background: '#ffffff',
-          border: '1px solid #e5e7eb',
-        }}>
-          <img 
-            src={resultImage} 
-            alt="Measurement result" 
-            style={{ width: '100%', display: 'block' }}
-          />
-        </IonCard>
-      )}
+      {/* result images */}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '16px', marginBottom: '16px' }}>
+        {resultImage && (
+          <IonCard style={{
+            margin: 0,
+            borderRadius: '20px',
+            overflow: 'hidden',
+            background: '#ffffff',
+            border: '1px solid #e5e7eb',
+          }}>
+            <div style={{ position: 'absolute', top: '10px', left: '10px', background: 'rgba(0,0,0,0.6)', color: 'white', padding: '4px 8px', borderRadius: '8px', fontSize: '12px', fontWeight: 'bold' }}>TOP VIEW</div>
+            <img 
+              src={resultImage} 
+              alt="Top view result" 
+              style={{ width: '100%', display: 'block' }}
+            />
+          </IonCard>
+        )}
+
+        {resultSideImage && (
+          <IonCard style={{
+            margin: 0,
+            borderRadius: '20px',
+            overflow: 'hidden',
+            background: '#ffffff',
+            border: '1px solid #e5e7eb',
+          }}>
+            <div style={{ position: 'absolute', top: '10px', left: '10px', background: 'rgba(0,160,0,0.8)', color: 'white', padding: '4px 8px', borderRadius: '8px', fontSize: '12px', fontWeight: 'bold' }}>SIDE VIEW (HEIGHT)</div>
+            <img 
+              src={resultSideImage} 
+              alt="Side view result" 
+              style={{ width: '100%', display: 'block' }}
+            />
+          </IonCard>
+        )}
+      </div>
 
       {/* Mode Badge */}
       <div style={{ display: 'flex', gap: '8px', marginBottom: '12px', justifyContent: 'center' }}>

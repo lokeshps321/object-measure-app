@@ -51,6 +51,9 @@ class MeasurementResponse(BaseModel):
     processed_image: Optional[str] = Field(
         None, description="Base64 encoded result image"
     )
+    processed_side_image: Optional[str] = Field(
+        None, description="Base64 encoded side result image"
+    )
     mode: str = Field(default="2d", description="Measurement mode")
     calibration_info: Optional[dict] = Field(
         None, description="Calibration details"
