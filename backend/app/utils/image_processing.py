@@ -173,8 +173,52 @@ Return ONLY the JSON. No markdown. No explanation."""
             bw = max(10, min(bw, w - x))
             bh = max(10, min(bh, h - y))
 
+            # === REFINE bbox using OpenCV contours for pixel-perfect tight box ===
+            # Add 20px padding to Gemini's rough region before searching for contours
+            pad = 20
+            rx = max(0, x - pad)
+            ry = max(0, y - pad)
+            rx2 = min(w, x + bw + pad)
+            ry2 = min(h, y + bh + pad)
+            roi = image[ry:ry2, rx:rx2]
+
+            if roi.size > 0:
+                roi_gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+                roi_blur = cv2.GaussianBlur(roi_gray, (5, 5), 1)
+
+                # Try Canny edges
+                edges = cv2.Canny(roi_blur, 30, 100)
+                edges = cv2.dilate(edges, np.ones((3, 3), np.uint8), iterations=2)
+                contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+                # Also try Otsu threshold
+                _, otsu = cv2.threshold(roi_blur, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+                otsu = cv2.morphologyEx(otsu, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8), iterations=2)
+                contours2, _ = cv2.findContours(otsu, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                contours = list(contours) + list(contours2)
+
+                # Find the largest contour that makes sense
+                best_contour = None
+                best_area = 0
+                roi_area = roi.shape[0] * roi.shape[1]
+                for cnt in contours:
+                    area = cv2.contourArea(cnt)
+                    if area > roi_area * 0.05 and area < roi_area * 0.99:
+                        if area > best_area:
+                            best_area = area
+                            best_contour = cnt
+
+                if best_contour is not None:
+                    cx_r, cy_r, cw_r, ch_r = cv2.boundingRect(best_contour)
+                    # Convert back to full image coordinates
+                    x = rx + cx_r
+                    y = ry + cy_r
+                    bw = cw_r
+                    bh = ch_r
+            # === END REFINE ===
+
             center = obj.get("center", [x + bw // 2, y + bh // 2])
-            cx, cy = int(center[0]), int(center[1])
+            cx, cy = x + bw // 2, y + bh // 2
 
             obj_type = "3D" if height_cm else "2D"
             color = (0, 255, 0) if obj_type == "3D" else (255, 165, 0)
