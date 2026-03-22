@@ -12,12 +12,14 @@ import base64
 import json
 import logging
 import os
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 
 logger = logging.getLogger(__name__)
 
-# Gemini API Key
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "AIzaSyAsVcu6NemLvN2f76Me2xAQfsMl4Ezttjs")
+# Gemini API Key (Paid tier)
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "AIzaSyDFVQ695dMWg-uGa6D6a7IDrVn5MVJ-YQk")
+GEMINI_MODEL = "gemini-2.5-flash"
 
 @dataclass
 class MeasuredObject:
@@ -57,14 +59,13 @@ def measure_with_gemini(
     Use Google Gemini Vision AI to detect and measure objects.
     """
     try:
-        genai.configure(api_key=GEMINI_API_KEY)
-        model = genai.GenerativeModel("gemini-2.0-flash")
+        client = genai.Client(api_key=GEMINI_API_KEY)
 
         h, w = image.shape[:2]
 
-        # Encode image to base64
+        # Encode image to bytes for Gemini
         _, buffer = cv2.imencode(".jpg", image, [cv2.IMWRITE_JPEG_QUALITY, 85])
-        img_b64 = base64.b64encode(buffer).decode("utf-8")
+        img_bytes = buffer.tobytes()
 
         # Build the prompt
         if mode == "3d":
@@ -115,19 +116,18 @@ Return height_cm for each object."""
 If no distinct objects are found, return: {{"objects": []}}
 Return ONLY the JSON, no markdown, no explanation."""
 
-        # Create the image part for Gemini
-        image_part = {
-            "mime_type": "image/jpeg",
-            "data": img_b64
-        }
+        # Create the image part for Gemini (new SDK)
+        image_part = types.Part.from_bytes(data=img_bytes, mime_type="image/jpeg")
 
-        response = model.generate_content([prompt, image_part])
+        response = client.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=[image_part, prompt]
+        )
         response_text = response.text.strip()
         
         # Clean up response - remove markdown code blocks if present
         if response_text.startswith("```"):
             lines = response_text.split("\n")
-            # Remove first and last lines (```json and ```)
             lines = [l for l in lines if not l.strip().startswith("```")]
             response_text = "\n".join(lines)
 
