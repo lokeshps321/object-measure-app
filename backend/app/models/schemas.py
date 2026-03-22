@@ -194,6 +194,10 @@ class RealtimeMeasurementRequest(BaseModel):
     calibration_distance_cm: Optional[float] = Field(
         None, description="Distance from camera to objects in cm (for calibration)"
     )
+    view_type: str = Field(
+        default="top",
+        description="View type: 'top' for length/width, 'side' for height",
+    )
 
     class Config:
         json_schema_extra = {
@@ -201,6 +205,7 @@ class RealtimeMeasurementRequest(BaseModel):
                 "image": "base64_encoded_image_data...",
                 "return_annotated": True,
                 "calibration_distance_cm": 100.0,
+                "view_type": "top",
             }
         }
 

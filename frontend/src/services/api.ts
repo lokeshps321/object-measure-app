@@ -58,6 +58,7 @@ export interface RealtimeMeasurementRequest {
   image: string;
   return_annotated?: boolean;
   calibration_distance_cm?: number;
+  view_type?: 'top' | 'side';
 }
 
 export interface ApiError {
@@ -102,12 +103,14 @@ export async function measureRealtime(
   options?: {
     returnAnnotated?: boolean;
     calibrationDistanceCm?: number;
+    viewType?: 'top' | 'side';
   }
 ): Promise<RealtimeMeasurementResponse> {
   const requestBody: RealtimeMeasurementRequest = {
     image: imageBase64,
     return_annotated: options?.returnAnnotated ?? true,
     calibration_distance_cm: options?.calibrationDistanceCm,
+    view_type: options?.viewType ?? 'top',
   };
 
   const response = await fetch(`${API_BASE_URL}/api/v2/measure`, {

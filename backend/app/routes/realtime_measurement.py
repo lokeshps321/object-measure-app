@@ -109,7 +109,9 @@ async def measure_realtime(request: RealtimeMeasurementRequest):
 
         # Process the frame
         result = processor.process_frame(
-            image, return_annotated=request.return_annotated
+            image,
+            return_annotated=request.return_annotated,
+            view_type=request.view_type if hasattr(request, "view_type") else "top",
         )
 
         # Convert to response format

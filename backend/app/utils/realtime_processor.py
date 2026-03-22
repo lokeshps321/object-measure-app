@@ -1,12 +1,11 @@
 """
-Real-time Object Measurement Processor - V4
-Place objects on A4 paper for accurate measurements
+Real-time Object Measurement Processor - V5
+Two-Photo Mode for Accurate 3D Measurements
 
 How it works:
-1. Detect the A4 paper (white rectangle) in the image
-2. Use A4 paper size (21.0 x 29.7 cm) to calculate pixels-per-cm
-3. Detect all objects ON the A4 paper
-4. Measure length, width, and estimate height for 3D objects
+1. TOP VIEW: Detect A4 paper, measure object's Length & Width
+2. SIDE VIEW: Use A4 paper edge as reference, measure Height
+3. Combine for accurate L × W × H measurements
 """
 
 import cv2
@@ -26,9 +25,14 @@ class ObjectType(str, Enum):
     OBJECT_3D = "3D"
 
 
+class ViewType(str, Enum):
+    TOP = "top"
+    SIDE = "side"
+
+
 # A4 paper dimensions in cm
-A4_WIDTH_CM = 21.0
-A4_HEIGHT_CM = 29.7
+A4_WIDTH_CM = 21.0  # Short edge
+A4_HEIGHT_CM = 29.7  # Long edge
 
 
 @dataclass
@@ -67,177 +71,210 @@ class RealtimeMeasurementResult:
     processing_time_ms: float
     annotated_image_base64: Optional[str] = None
     calibration_info: Optional[Dict] = None
+    view_type: str = "top"
 
 
 class RealtimeProcessor:
     """
     Measure objects placed on A4 paper
+    Supports both top-view (2D) and side-view (height) measurements
     """
 
     # Detection parameters
-    MIN_OBJECT_AREA = (
-        300  # Minimum object size in pixels (lowered for small objects like earbuds)
-    )
-    MAX_OBJECT_AREA = 500000  # Maximum object size
+    MIN_OBJECT_AREA = 200  # Lowered for small objects
+    MAX_OBJECT_AREA = 500000
 
-    def __init__(self, confidence_threshold: float = 0.4):
+    def __init__(self, confidence_threshold: float = 0.3):
         self.confidence_threshold = confidence_threshold
         self._models_loaded = True
         self._calibration: Optional[CalibrationData] = None
-
-        # Default pixels per cm (will be overridden by A4 detection)
-        # Assume phone camera at ~30cm from A4 paper
         self._default_pixels_per_cm = 40.0
 
-        logger.info("RealtimeProcessor V4 initialized - A4 paper reference")
+        # Store top-view measurements for combining with side view
+        self._top_view_objects: List[MeasuredObject3D] = []
+        self._top_view_pixels_per_cm: float = 0
+
+        logger.info("RealtimeProcessor V5 initialized - Two-photo 3D measurement")
 
     def _order_points(self, pts: np.ndarray) -> np.ndarray:
         """Order points: top-left, top-right, bottom-right, bottom-left"""
         rect = np.zeros((4, 2), dtype="float32")
         s = pts.sum(axis=1)
-        rect[0] = pts[np.argmin(s)]  # top-left
-        rect[2] = pts[np.argmax(s)]  # bottom-right
+        rect[0] = pts[np.argmin(s)]
+        rect[2] = pts[np.argmax(s)]
         diff = np.diff(pts, axis=1)
-        rect[1] = pts[np.argmin(diff)]  # top-right
-        rect[3] = pts[np.argmax(diff)]  # bottom-left
+        rect[1] = pts[np.argmin(diff)]
+        rect[3] = pts[np.argmax(diff)]
         return rect
 
     def _detect_a4_paper(self, image: np.ndarray) -> Tuple[Optional[np.ndarray], float]:
         """
-        Detect A4 paper (large white/light rectangle) in the image
+        Detect A4 paper in the image
         Returns: (corner_points, pixels_per_cm)
         """
         height, width = image.shape[:2]
-
-        # Convert to grayscale
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-
-        # Apply bilateral filter to reduce noise
         blurred = cv2.bilateralFilter(gray, 11, 17, 17)
-
-        # Detect white/light regions (A4 paper is usually white)
-        # Also try edge detection for paper with objects on it
 
         best_rect = None
         best_score = 0
         best_pixels_per_cm = self._default_pixels_per_cm
 
-        # Method 1: Threshold for white paper
-        _, white_mask = cv2.threshold(blurred, 200, 255, cv2.THRESH_BINARY)
+        # Method 1: White region detection
+        _, white_mask = cv2.threshold(blurred, 180, 255, cv2.THRESH_BINARY)
+        kernel = np.ones((5, 5), np.uint8)
+        white_mask = cv2.morphologyEx(white_mask, cv2.MORPH_CLOSE, kernel, iterations=3)
+        white_mask = cv2.morphologyEx(white_mask, cv2.MORPH_OPEN, kernel, iterations=2)
 
-        # Method 2: Adaptive threshold
-        adaptive_mask = cv2.adaptiveThreshold(
-            blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2
+        contours, _ = cv2.findContours(
+            white_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
         )
 
-        # Method 3: Edge detection
-        edges = cv2.Canny(blurred, 30, 100)
-        kernel = np.ones((3, 3), np.uint8)
-        edges = cv2.dilate(edges, kernel, iterations=2)
+        for contour in contours:
+            area = cv2.contourArea(contour)
+            if area < (width * height * 0.1) or area > (width * height * 0.95):
+                continue
 
-        # Try all methods
-        for mask in [white_mask, adaptive_mask, edges]:
+            peri = cv2.arcLength(contour, True)
+            approx = cv2.approxPolyDP(contour, 0.02 * peri, True)
+
+            if len(approx) == 4:
+                pts = approx.reshape(4, 2).astype(np.float32)
+                ordered = self._order_points(pts)
+
+                w1 = np.linalg.norm(ordered[1] - ordered[0])
+                w2 = np.linalg.norm(ordered[2] - ordered[3])
+                h1 = np.linalg.norm(ordered[3] - ordered[0])
+                h2 = np.linalg.norm(ordered[2] - ordered[1])
+
+                rect_width = (w1 + w2) / 2
+                rect_height = (h1 + h2) / 2
+
+                if rect_width < 50 or rect_height < 50:
+                    continue
+
+                # Check A4 aspect ratio (1.414)
+                aspect = max(rect_width, rect_height) / min(rect_width, rect_height)
+                if 1.3 < aspect < 1.55:
+                    # Calculate pixels per cm
+                    if rect_width > rect_height:
+                        pixels_per_cm = rect_width / A4_HEIGHT_CM
+                    else:
+                        pixels_per_cm = rect_height / A4_HEIGHT_CM
+
+                    # Score based on size and rectangularity
+                    hull = cv2.convexHull(contour)
+                    hull_area = cv2.contourArea(hull)
+                    solidity = area / hull_area if hull_area > 0 else 0
+                    size_score = min(area / (width * height * 0.5), 1.0)
+                    score = solidity * 0.6 + size_score * 0.4
+
+                    if score > best_score:
+                        best_score = score
+                        best_rect = ordered
+                        best_pixels_per_cm = pixels_per_cm
+
+        # Method 2: Edge detection fallback
+        if best_rect is None or best_score < 0.5:
+            edges = cv2.Canny(blurred, 50, 150)
+            edges = cv2.dilate(edges, kernel, iterations=2)
             contours, _ = cv2.findContours(
-                mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+                edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
             )
 
-            for contour in contours:
+            for contour in sorted(contours, key=cv2.contourArea, reverse=True)[:10]:
+                area = cv2.contourArea(contour)
+                if area < (width * height * 0.1):
+                    continue
+
                 peri = cv2.arcLength(contour, True)
                 approx = cv2.approxPolyDP(contour, 0.02 * peri, True)
 
-                # Looking for 4-sided polygon (rectangle)
                 if len(approx) == 4:
-                    area = cv2.contourArea(approx)
+                    pts = approx.reshape(4, 2).astype(np.float32)
+                    ordered = self._order_points(pts)
 
-                    # A4 paper should be large - at least 15% of image, up to 80%
-                    min_area = width * height * 0.15
-                    max_area = width * height * 0.80
+                    w1 = np.linalg.norm(ordered[1] - ordered[0])
+                    h1 = np.linalg.norm(ordered[3] - ordered[0])
+                    rect_width = w1
+                    rect_height = h1
 
-                    if min_area < area < max_area:
-                        # Order points
-                        rect = self._order_points(approx.reshape(4, 2))
+                    aspect = max(rect_width, rect_height) / min(rect_width, rect_height)
+                    if 1.3 < aspect < 1.55:
+                        if rect_width > rect_height:
+                            pixels_per_cm = rect_width / A4_HEIGHT_CM
+                        else:
+                            pixels_per_cm = rect_height / A4_HEIGHT_CM
 
-                        # Calculate dimensions
-                        w1 = np.linalg.norm(rect[0] - rect[1])
-                        w2 = np.linalg.norm(rect[2] - rect[3])
-                        h1 = np.linalg.norm(rect[0] - rect[3])
-                        h2 = np.linalg.norm(rect[1] - rect[2])
-
-                        avg_w = (w1 + w2) / 2
-                        avg_h = (h1 + h2) / 2
-
-                        # Ensure width < height (portrait A4)
-                        if avg_w > avg_h:
-                            avg_w, avg_h = avg_h, avg_w
-
-                        # A4 aspect ratio is 21/29.7 = 0.707 (portrait)
-                        aspect_ratio = avg_w / avg_h if avg_h > 0 else 0
-                        expected_ratio = A4_WIDTH_CM / A4_HEIGHT_CM  # 0.707
-
-                        ratio_diff = abs(aspect_ratio - expected_ratio)
-
-                        # Accept if aspect ratio is close to A4
-                        if ratio_diff < 0.15:
-                            # Check rectangularity
-                            hull = cv2.convexHull(contour)
-                            hull_area = cv2.contourArea(hull)
-                            solidity = area / hull_area if hull_area > 0 else 0
-
-                            # Score based on size, aspect ratio, and rectangularity
-                            area_ratio = area / (width * height)
-                            size_score = min(1.0, area_ratio / 0.4)  # Prefer larger
-                            ratio_score = 1 - ratio_diff / 0.15
-
-                            score = (
-                                solidity * 0.3 + ratio_score * 0.4 + size_score * 0.3
-                            )
-
-                            if score > best_score and score > 0.5:
-                                best_score = score
-                                best_rect = rect
-
-                                # Calculate pixels per cm
-                                # A4 is 21 x 29.7 cm
-                                px_per_cm_w = avg_w / A4_WIDTH_CM
-                                px_per_cm_h = avg_h / A4_HEIGHT_CM
-                                best_pixels_per_cm = (px_per_cm_w + px_per_cm_h) / 2
+                        if best_rect is None:
+                            best_rect = ordered
+                            best_pixels_per_cm = pixels_per_cm
+                        break
 
         return best_rect, best_pixels_per_cm
 
-    def _detect_objects_on_paper(
-        self, image: np.ndarray, a4_corners: Optional[np.ndarray], pixels_per_cm: float
-    ) -> List[dict]:
+    def _detect_a4_edge_side_view(self, image: np.ndarray) -> Tuple[bool, float]:
         """
-        Detect objects placed on the A4 paper
-        Uses multiple detection methods for robustness
+        Detect A4 paper edge in side view for height calibration
+        In side view, A4 paper appears as a thin white line/edge
+        Returns: (detected, pixels_per_cm)
         """
         height, width = image.shape[:2]
-        detected_objects = []
-
-        # Convert to grayscale
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
 
-        # Apply CLAHE for better contrast
+        # Look for horizontal white line (A4 paper edge)
+        # The A4 paper lying flat will show as a line at the bottom
+
+        # Use stored calibration if available
+        if self._top_view_pixels_per_cm > 0:
+            return True, self._top_view_pixels_per_cm
+
+        # Try to detect the paper edge
+        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+        edges = cv2.Canny(blurred, 50, 150)
+
+        # Look for long horizontal lines (paper edge)
+        lines = cv2.HoughLinesP(
+            edges, 1, np.pi / 180, 100, minLineLength=width * 0.3, maxLineGap=20
+        )
+
+        if lines is not None:
+            # Find the most horizontal line near bottom half of image
+            for line in lines:
+                x1, y1, x2, y2 = line[0]
+                angle = abs(np.arctan2(y2 - y1, x2 - x1) * 180 / np.pi)
+                if angle < 10 or angle > 170:  # Nearly horizontal
+                    line_length = np.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
+                    # Estimate pixels_per_cm from line length (assume it's A4 long edge)
+                    pixels_per_cm = line_length / A4_HEIGHT_CM
+                    return True, pixels_per_cm
+
+        return False, self._default_pixels_per_cm
+
+    def _detect_objects(
+        self,
+        image: np.ndarray,
+        paper_mask: Optional[np.ndarray],
+        pixels_per_cm: float,
+        a4_corners: Optional[np.ndarray],
+        view_type: ViewType = ViewType.TOP,
+    ) -> List[MeasuredObject3D]:
+        """Detect and measure objects in the image"""
+        height, width = image.shape[:2]
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+
+        # Enhance contrast
         clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
         enhanced = clahe.apply(gray)
 
-        # Create mask for A4 paper region if detected
-        paper_mask = None
-        if a4_corners is not None:
-            paper_mask = np.zeros((height, width), dtype=np.uint8)
-            pts = a4_corners.astype(np.int32)
-            cv2.fillPoly(paper_mask, [pts], 255)
-
-        # Collect contours from multiple methods
+        kernel = np.ones((3, 3), np.uint8)
         all_contours = []
 
-        # Method 1: Edge detection (good for textured objects)
+        # Method 1: Edge detection
         blurred = cv2.GaussianBlur(enhanced, (5, 5), 0)
         edges = cv2.Canny(blurred, 30, 100)
-        kernel = np.ones((3, 3), np.uint8)
         edges = cv2.dilate(edges, kernel, iterations=2)
         edges = cv2.erode(edges, kernel, iterations=1)
-        # Apply paper_mask to only detect edges within the A4 paper
         if paper_mask is not None:
             edges = cv2.bitwise_and(edges, paper_mask)
         contours1, _ = cv2.findContours(
@@ -245,18 +282,17 @@ class RealtimeProcessor:
         )
         all_contours.extend(contours1)
 
-        # Method 2: Threshold for dark objects on white paper
+        # Method 2: Threshold for dark objects
         _, dark_mask = cv2.threshold(gray, 180, 255, cv2.THRESH_BINARY_INV)
         if paper_mask is not None:
             dark_mask = cv2.bitwise_and(dark_mask, paper_mask)
         dark_mask = cv2.morphologyEx(dark_mask, cv2.MORPH_CLOSE, kernel, iterations=2)
-        dark_mask = cv2.morphologyEx(dark_mask, cv2.MORPH_OPEN, kernel, iterations=1)
         contours2, _ = cv2.findContours(
             dark_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
         )
         all_contours.extend(contours2)
 
-        # Method 3: Adaptive threshold (good for varying lighting)
+        # Method 3: Adaptive threshold
         adaptive = cv2.adaptiveThreshold(
             blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 11, 2
         )
@@ -268,63 +304,53 @@ class RealtimeProcessor:
         )
         all_contours.extend(contours3)
 
-        # Method 4: Color-based detection (objects that differ from white)
+        # Method 4: Color-based detection
         hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
-        # Detect non-white areas (saturation > 20 or value < 220)
-        color_mask = cv2.inRange(hsv, (0, 20, 0), (180, 255, 255))
-        low_value_mask = cv2.inRange(hsv, (0, 0, 0), (180, 255, 220))
-        combined_color = cv2.bitwise_or(color_mask, low_value_mask)
+        color_mask = cv2.inRange(hsv, (0, 15, 0), (180, 255, 255))
+        low_value = cv2.inRange(hsv, (0, 0, 0), (180, 255, 230))
+        combined = cv2.bitwise_or(color_mask, low_value)
         if paper_mask is not None:
-            combined_color = cv2.bitwise_and(combined_color, paper_mask)
-        combined_color = cv2.morphologyEx(
-            combined_color, cv2.MORPH_CLOSE, kernel, iterations=2
-        )
+            combined = cv2.bitwise_and(combined, paper_mask)
+        combined = cv2.morphologyEx(combined, cv2.MORPH_CLOSE, kernel, iterations=2)
         contours4, _ = cv2.findContours(
-            combined_color, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+            combined, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
         )
         all_contours.extend(contours4)
 
-        # Method 5: Shadow/gradient detection for white objects on white paper
-        # Detect subtle shadows and gradients that indicate 3D objects
+        # Method 5: Laplacian for edge/shadow detection
         laplacian = cv2.Laplacian(blurred, cv2.CV_64F)
         laplacian = np.uint8(np.absolute(laplacian))
-        _, shadow_mask = cv2.threshold(laplacian, 10, 255, cv2.THRESH_BINARY)
+        _, lap_mask = cv2.threshold(laplacian, 8, 255, cv2.THRESH_BINARY)
         if paper_mask is not None:
-            shadow_mask = cv2.bitwise_and(shadow_mask, paper_mask)
-        shadow_mask = cv2.morphologyEx(
-            shadow_mask, cv2.MORPH_CLOSE, kernel, iterations=3
-        )
-        shadow_mask = cv2.morphologyEx(
-            shadow_mask, cv2.MORPH_OPEN, kernel, iterations=1
-        )
+            lap_mask = cv2.bitwise_and(lap_mask, paper_mask)
+        lap_mask = cv2.morphologyEx(lap_mask, cv2.MORPH_CLOSE, kernel, iterations=3)
         contours5, _ = cv2.findContours(
-            shadow_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+            lap_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
         )
         all_contours.extend(contours5)
 
-        # Sort all contours by area and remove duplicates
+        # Sort by area
         all_contours = sorted(all_contours, key=cv2.contourArea, reverse=True)
 
-        # Track detected regions to avoid duplicates
         detected_regions = []
-
+        objects = []
         object_id = 0
-        for contour in all_contours[:30]:  # Check top 30 from all methods
+
+        for contour in all_contours[:50]:
             area = cv2.contourArea(contour)
 
             if area < self.MIN_OBJECT_AREA or area > self.MAX_OBJECT_AREA:
                 continue
 
-            # Get bounding rect
             x, y, w, h = cv2.boundingRect(contour)
 
             # Skip very thin objects
             aspect = max(w, h) / min(w, h) if min(w, h) > 0 else 100
-            if aspect > 12:
+            if aspect > 15:
                 continue
 
-            # Skip objects at image edge
-            margin = 5
+            # Skip objects at edge
+            margin = 3
             if (
                 x < margin
                 or y < margin
@@ -333,31 +359,25 @@ class RealtimeProcessor:
             ):
                 continue
 
-            # Check if object is on the A4 paper (if detected)
-            cx = x + w // 2
-            cy = y + h // 2
-
+            # Check if on paper
+            cx, cy = x + w // 2, y + h // 2
             if paper_mask is not None:
-                # Object center should be on paper
                 if paper_mask[cy, cx] == 0:
                     continue
+                # Skip if this is the A4 paper itself
+                if a4_corners is not None:
+                    paper_area = cv2.contourArea(
+                        a4_corners.astype(np.int32).reshape(-1, 1, 2)
+                    )
+                    if abs(area - paper_area) / paper_area < 0.2:
+                        continue
 
-                # Skip if this IS the A4 paper itself
-                paper_area = cv2.contourArea(
-                    a4_corners.astype(np.int32).reshape(-1, 1, 2)
-                )
-                if abs(area - paper_area) / paper_area < 0.15:
-                    continue
-
-            # Check for duplicate regions (from multiple detection methods)
+            # Check for duplicates
             is_duplicate = False
             for rx, ry, rw, rh in detected_regions:
-                # Check overlap
                 overlap_x = max(0, min(x + w, rx + rw) - max(x, rx))
                 overlap_y = max(0, min(y + h, ry + rh) - max(y, ry))
-                overlap_area = overlap_x * overlap_y
-                min_area = min(w * h, rw * rh)
-                if overlap_area > 0.5 * min_area:
+                if overlap_x * overlap_y > 0.4 * min(w * h, rw * rh):
                     is_duplicate = True
                     break
 
@@ -367,383 +387,326 @@ class RealtimeProcessor:
             detected_regions.append((x, y, w, h))
 
             # Calculate confidence
-            perimeter = cv2.arcLength(contour, True)
-            approx = cv2.approxPolyDP(contour, 0.02 * perimeter, True)
-
             hull = cv2.convexHull(contour)
             hull_area = cv2.contourArea(hull)
             solidity = area / hull_area if hull_area > 0 else 0
-
-            circularity = (
-                4 * np.pi * area / (perimeter * perimeter) if perimeter > 0 else 0
-            )
-
-            confidence = min(0.95, solidity * 0.5 + circularity * 0.2 + 0.3)
+            confidence = min(0.95, solidity * 0.7 + 0.25)
 
             if confidence < self.confidence_threshold:
                 continue
 
             object_id += 1
 
-            # Get rotated rectangle for accurate dimensions
+            # Get dimensions using rotated rectangle for accuracy
             rect = cv2.minAreaRect(contour)
-            box = cv2.boxPoints(rect)
-            box = np.intp(box)
+            box_w, box_h = rect[1]
 
-            rect_w, rect_h = rect[1]
-            if rect_w < rect_h:
-                rect_w, rect_h = rect_h, rect_w
+            # Ensure length > width
+            if box_w < box_h:
+                box_w, box_h = box_h, box_w
 
-            # Analyze for 3D detection
-            roi = gray[max(0, y) : min(height, y + h), max(0, x) : min(width, x + w)]
+            # Convert to cm
+            length_cm = round(box_w / pixels_per_cm, 1)
+            width_cm = round(box_h / pixels_per_cm, 1)
 
-            is_3d = False
-            depth_factor = 0.0
+            # For side view, the "height" in image is the object's real height
+            if view_type == ViewType.SIDE:
+                # In side view: image width = object length, image height = object height
+                height_cm = round(h / pixels_per_cm, 1)
+                obj_type = ObjectType.OBJECT_3D
+            else:
+                # Top view: estimate if 3D based on shadows/texture
+                height_cm = None
+                obj_type = ObjectType.OBJECT_2D
 
-            if roi.size > 0:
-                # Texture analysis
-                texture_var = np.var(roi)
+                # Check for 3D indicators (shadows, gradients)
+                roi = gray[y : y + h, x : x + w]
+                if roi.size > 0:
+                    std_dev = np.std(roi)
+                    if std_dev > 25:  # Significant variation suggests 3D
+                        obj_type = ObjectType.OBJECT_3D
+                        # Rough height estimate from shadow
+                        height_cm = round(min(length_cm, width_cm) * 0.3, 1)
 
-                # Gradient analysis
-                sobelx = cv2.Sobel(roi, cv2.CV_64F, 1, 0, ksize=3)
-                sobely = cv2.Sobel(roi, cv2.CV_64F, 0, 1, ksize=3)
-                gradient_mag = np.sqrt(sobelx**2 + sobely**2)
-                gradient_mean = np.mean(gradient_mag)
-
-                # Edge density
-                roi_edges = cv2.Canny(roi, 50, 150)
-                edge_density = np.sum(roi_edges > 0) / roi.size
-
-                # Shadow detection (brightness gradient)
-                h_third = roi.shape[0] // 3
-                if h_third > 0:
-                    top_bright = np.mean(roi[:h_third, :])
-                    bottom_bright = np.mean(roi[-h_third:, :])
-                    bright_diff = abs(top_bright - bottom_bright)
-                else:
-                    bright_diff = 0
-
-                # Combine for 3D score
-                texture_score = min(1.0, texture_var / 2000)
-                gradient_score = min(1.0, gradient_mean / 50)
-                edge_score = min(1.0, edge_density * 20)
-                shadow_score = min(1.0, bright_diff / 50)
-
-                depth_factor = (
-                    texture_score * 0.2
-                    + gradient_score * 0.3
-                    + edge_score * 0.2
-                    + shadow_score * 0.3
+            objects.append(
+                MeasuredObject3D(
+                    object_id=object_id,
+                    object_type=obj_type,
+                    label=f"Object {object_id}",
+                    confidence=round(confidence, 2),
+                    length_cm=length_cm,
+                    width_cm=width_cm,
+                    height_cm=height_cm,
+                    bounding_box=(x, y, w, h),
+                    center=(cx, cy),
                 )
-
-                # 3D if significant depth or complex shape
-                is_3d = depth_factor > 0.35 or len(approx) > 6 or solidity < 0.85
-
-            detected_objects.append(
-                {
-                    "id": object_id,
-                    "bbox": (x, y, w, h),
-                    "rotated_rect": rect,
-                    "box_points": box,
-                    "rect_width_px": rect_w,
-                    "rect_height_px": rect_h,
-                    "center": (cx, cy),
-                    "confidence": confidence,
-                    "contour": contour,
-                    "is_3d": is_3d,
-                    "depth_factor": depth_factor,
-                }
             )
 
-        return detected_objects
+        return objects
 
-    def _calculate_dimensions(
-        self, obj: dict, pixels_per_cm: float
-    ) -> Tuple[float, float, Optional[float]]:
-        """
-        Calculate real dimensions in cm
-        """
-        # Get pixel dimensions
-        width_px = obj["rect_width_px"]
-        height_px = obj["rect_height_px"]
-
-        # Convert to cm
-        length_cm = round(width_px / pixels_per_cm, 1)
-        width_cm = round(height_px / pixels_per_cm, 1)
-
-        # Ensure length >= width
-        if length_cm < width_cm:
-            length_cm, width_cm = width_cm, length_cm
-
-        # Minimum 0.5 cm
-        length_cm = max(0.5, length_cm)
-        width_cm = max(0.5, width_cm)
-
-        # Calculate height for 3D objects
-        height_cm = None
-        if obj["is_3d"]:
-            depth_factor = obj["depth_factor"]
-
-            # Estimate height based on depth factor
-            # Typical objects: height is 20-80% of smallest dimension
-            min_dim = min(length_cm, width_cm)
-            height_cm = round(min_dim * (0.2 + depth_factor * 0.6), 1)
-            height_cm = max(0.5, min(height_cm, min_dim * 1.5))
-
-        return length_cm, width_cm, height_cm
-
-    def _annotate_image(
+    def _draw_annotations(
         self,
         image: np.ndarray,
         objects: List[MeasuredObject3D],
         a4_corners: Optional[np.ndarray],
-        a4_detected: bool,
         pixels_per_cm: float,
+        view_type: ViewType = ViewType.TOP,
     ) -> np.ndarray:
-        """Draw annotations on image"""
+        """Draw measurement annotations on image"""
         annotated = image.copy()
-        height, width = image.shape[:2]
 
         # Draw A4 paper outline
         if a4_corners is not None:
             pts = a4_corners.astype(np.int32)
-            cv2.polylines(annotated, [pts], True, (0, 255, 255), 3)
-
-            # Label
+            cv2.polylines(annotated, [pts], True, (0, 255, 0), 3)
             cv2.putText(
                 annotated,
-                "A4 Paper (21 x 29.7 cm)",
-                (int(pts[0][0]), int(pts[0][1]) - 15),
+                "A4 Paper",
+                (int(pts[0][0]), int(pts[0][1]) - 10),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.7,
-                (0, 255, 255),
+                (0, 255, 0),
                 2,
             )
 
-        # Calibration status
-        if a4_detected:
-            status = f"A4 Detected - {pixels_per_cm:.1f} px/cm"
-            status_color = (0, 255, 0)
-        else:
-            status = "Place objects on A4 paper"
-            status_color = (0, 165, 255)
-
-        cv2.putText(
-            annotated, status, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, status_color, 2
-        )
-
-        # Draw each object
+        # Draw objects
         for obj in objects:
             x, y, w, h = obj.bounding_box
 
-            # Color: green for 3D, blue for 2D
-            if obj.object_type == ObjectType.OBJECT_3D:
-                color = (0, 255, 0)
-                bg_color = (0, 180, 0)
-            else:
-                color = (255, 165, 0)
-                bg_color = (200, 130, 0)
+            # Color based on type
+            color = (
+                (0, 165, 255)
+                if obj.object_type == ObjectType.OBJECT_3D
+                else (255, 165, 0)
+            )
 
-            # Draw box
+            # Draw bounding box
             cv2.rectangle(annotated, (x, y), (x + w, y + h), color, 2)
 
-            # Corner markers
-            m = min(20, w // 4, h // 4)
-            t = 3
-            cv2.line(annotated, (x, y), (x + m, y), color, t)
-            cv2.line(annotated, (x, y), (x, y + m), color, t)
-            cv2.line(annotated, (x + w, y), (x + w - m, y), color, t)
-            cv2.line(annotated, (x + w, y), (x + w, y + m), color, t)
-            cv2.line(annotated, (x, y + h), (x + m, y + h), color, t)
-            cv2.line(annotated, (x, y + h), (x, y + h - m), color, t)
-            cv2.line(annotated, (x + w, y + h), (x + w - m, y + h), color, t)
-            cv2.line(annotated, (x + w, y + h), (x + w, y + h - m), color, t)
-
-            # Labels
-            type_label = f"{obj.object_type.value}: {obj.label}"
-            if obj.object_type == ObjectType.OBJECT_3D and obj.height_cm:
-                dim_text = f"L:{obj.length_cm} W:{obj.width_cm} H:{obj.height_cm} cm"
+            # Draw label with dimensions
+            if view_type == ViewType.TOP:
+                if obj.height_cm:
+                    label = f"L:{obj.length_cm} W:{obj.width_cm} H:{obj.height_cm}cm"
+                else:
+                    label = f"L:{obj.length_cm} x W:{obj.width_cm} cm"
             else:
-                dim_text = f"L:{obj.length_cm} W:{obj.width_cm} cm"
+                label = f"Height: {obj.height_cm} cm"
 
-            font = cv2.FONT_HERSHEY_SIMPLEX
-            font_scale = 0.6
-            thickness = 2
-
-            # Type label at top
-            (tw, th), _ = cv2.getTextSize(type_label, font, font_scale, thickness)
-            cv2.rectangle(annotated, (x, y - th - 8), (x + tw + 8, y), bg_color, -1)
+            # Background for text
+            (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
+            cv2.rectangle(annotated, (x, y - th - 10), (x + tw + 10, y), color, -1)
             cv2.putText(
                 annotated,
-                type_label,
-                (x + 4, y - 4),
-                font,
-                font_scale,
+                label,
+                (x + 5, y - 5),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
                 (255, 255, 255),
-                thickness,
+                2,
             )
 
-            # Dimensions at bottom
-            (dw, dh), _ = cv2.getTextSize(dim_text, font, font_scale, thickness)
-            cv2.rectangle(
-                annotated, (x, y + h), (x + dw + 8, y + h + dh + 8), bg_color, -1
-            )
-            cv2.putText(
-                annotated,
-                dim_text,
-                (x + 4, y + h + dh + 4),
-                font,
-                font_scale,
-                (255, 255, 255),
-                thickness,
-            )
-
-            # Dimension arrows
-            mid_y = y + h // 2
-            mid_x = x + w // 2
-
-            if w > 40:
-                cv2.arrowedLine(
-                    annotated,
-                    (x + 5, mid_y),
-                    (x + w - 5, mid_y),
-                    (255, 255, 255),
-                    2,
-                    tipLength=0.05,
-                )
-            if h > 40:
-                cv2.arrowedLine(
-                    annotated,
-                    (mid_x, y + 5),
-                    (mid_x, y + h - 5),
-                    (255, 255, 255),
-                    2,
-                    tipLength=0.05,
-                )
+        # Draw calibration info
+        info = f"Scale: {pixels_per_cm:.1f} px/cm | View: {view_type.value.upper()}"
+        cv2.putText(
+            annotated, info, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2
+        )
 
         return annotated
 
     def process_frame(
-        self, image: np.ndarray, return_annotated: bool = True
+        self, image: np.ndarray, return_annotated: bool = True, view_type: str = "top"
     ) -> RealtimeMeasurementResult:
         """
-        Process frame and measure objects on A4 paper
+        Process a camera frame and measure objects
+
+        Args:
+            image: BGR image from camera
+            return_annotated: Whether to return annotated image
+            view_type: "top" for length/width, "side" for height
         """
         start_time = time.time()
         height, width = image.shape[:2]
 
-        try:
-            # Step 1: Detect A4 paper
+        vtype = ViewType.TOP if view_type == "top" else ViewType.SIDE
+
+        if vtype == ViewType.TOP:
+            # TOP VIEW: Detect A4 paper and measure L × W
             a4_corners, pixels_per_cm = self._detect_a4_paper(image)
             a4_detected = a4_corners is not None
 
             if not a4_detected:
+                # Try with default calibration
                 pixels_per_cm = self._default_pixels_per_cm
-
-            # Step 2: Detect objects on paper
-            detected = self._detect_objects_on_paper(image, a4_corners, pixels_per_cm)
-
-            if not detected:
-                processing_time = (time.time() - start_time) * 1000
-
-                # Still annotate to show A4 detection status
-                annotated_base64 = None
-                if return_annotated:
-                    annotated = self._annotate_image(
-                        image, [], a4_corners, a4_detected, pixels_per_cm
-                    )
-                    _, buffer = cv2.imencode(
-                        ".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 85]
-                    )
-                    annotated_base64 = base64.b64encode(buffer).decode("utf-8")
-
-                msg = "No objects detected."
-                if not a4_detected:
-                    msg += " Place objects on A4 paper for measurement."
-                else:
-                    msg += " Place objects on the A4 paper."
-
-                return RealtimeMeasurementResult(
-                    success=True,
-                    message=msg,
-                    objects=[],
-                    frame_width=width,
-                    frame_height=height,
-                    processing_time_ms=round(processing_time, 2),
-                    annotated_image_base64=annotated_base64,
-                    calibration_info={
-                        "reference_detected": a4_detected,
-                        "reference_type": "a4_paper",
-                        "pixels_per_cm": round(pixels_per_cm, 2),
-                    },
-                )
-
-            # Step 3: Calculate dimensions
-            measured_objects = []
-            for obj in detected:
-                length_cm, width_cm, height_cm = self._calculate_dimensions(
-                    obj, pixels_per_cm
-                )
-
-                measured = MeasuredObject3D(
-                    object_id=obj["id"],
-                    object_type=ObjectType.OBJECT_3D
-                    if obj["is_3d"]
-                    else ObjectType.OBJECT_2D,
-                    label=f"Object {obj['id']}",
-                    confidence=round(obj["confidence"], 2),
-                    length_cm=length_cm,
-                    width_cm=width_cm,
-                    height_cm=height_cm,
-                    bounding_box=obj["bbox"],
-                    center=obj["center"],
-                )
-                measured_objects.append(measured)
-
-            # Step 4: Annotate
-            annotated_base64 = None
-            if return_annotated:
-                annotated = self._annotate_image(
-                    image, measured_objects, a4_corners, a4_detected, pixels_per_cm
-                )
-                _, buffer = cv2.imencode(
-                    ".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 85]
-                )
-                annotated_base64 = base64.b64encode(buffer).decode("utf-8")
-
-            processing_time = (time.time() - start_time) * 1000
-
-            msg = f"Measured {len(measured_objects)} object(s)"
-            if a4_detected:
-                msg += " on A4 paper"
             else:
-                msg += " (estimates - add A4 paper for accuracy)"
+                # Store for side view
+                self._top_view_pixels_per_cm = pixels_per_cm
 
-            return RealtimeMeasurementResult(
-                success=True,
-                message=msg,
-                objects=measured_objects,
-                frame_width=width,
-                frame_height=height,
-                processing_time_ms=round(processing_time, 2),
-                annotated_image_base64=annotated_base64,
-                calibration_info={
-                    "reference_detected": a4_detected,
-                    "reference_type": "a4_paper",
-                    "pixels_per_cm": round(pixels_per_cm, 2),
-                },
+            # Create paper mask
+            paper_mask = None
+            if a4_corners is not None:
+                paper_mask = np.zeros((height, width), dtype=np.uint8)
+                cv2.fillPoly(paper_mask, [a4_corners.astype(np.int32)], 255)
+
+            # Detect objects
+            objects = self._detect_objects(
+                image, paper_mask, pixels_per_cm, a4_corners, vtype
             )
 
-        except Exception as e:
-            logger.error(f"Error processing frame: {e}", exc_info=True)
+            # Store top view objects
+            self._top_view_objects = objects
+
+        else:
+            # SIDE VIEW: Measure height
+            a4_detected, pixels_per_cm = self._detect_a4_edge_side_view(image)
+            a4_corners = None
+
+            # For side view, detect objects without paper mask
+            objects = self._detect_objects(image, None, pixels_per_cm, None, vtype)
+
+            # Update heights in stored top-view objects if we have them
+            if self._top_view_objects and objects:
+                for top_obj in self._top_view_objects:
+                    # Find matching object (by position/size similarity)
+                    for side_obj in objects:
+                        # Use the height from side view
+                        top_obj.height_cm = side_obj.height_cm
+                        top_obj.object_type = ObjectType.OBJECT_3D
+                        break
+                objects = self._top_view_objects
+
+        # Generate annotated image
+        annotated_b64 = None
+        if return_annotated:
+            annotated = self._draw_annotations(
+                image, objects, a4_corners, pixels_per_cm, vtype
+            )
+            _, buffer = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 85])
+            annotated_b64 = base64.b64encode(buffer).decode("utf-8")
+
+        processing_time = (time.time() - start_time) * 1000
+
+        if not objects:
             return RealtimeMeasurementResult(
-                success=False,
-                message=f"Processing error: {str(e)}",
+                success=True,
+                message="No objects detected. Place objects on A4 paper for measurement.",
                 objects=[],
                 frame_width=width,
                 frame_height=height,
-                processing_time_ms=round((time.time() - start_time) * 1000, 2),
+                processing_time_ms=round(processing_time, 2),
+                annotated_image_base64=annotated_b64,
+                calibration_info={
+                    "reference_detected": a4_detected,
+                    "reference_type": "a4_paper",
+                    "pixels_per_cm": float(pixels_per_cm),
+                },
+                view_type=vtype.value,
             )
+
+        return RealtimeMeasurementResult(
+            success=True,
+            message=f"Measured {len(objects)} object(s) - {vtype.value} view",
+            objects=objects,
+            frame_width=width,
+            frame_height=height,
+            processing_time_ms=round(processing_time, 2),
+            annotated_image_base64=annotated_b64,
+            calibration_info={
+                "reference_detected": a4_detected,
+                "reference_type": "a4_paper",
+                "pixels_per_cm": float(pixels_per_cm),
+            },
+            view_type=vtype.value,
+        )
+
+    def process_two_photos(
+        self,
+        top_image: np.ndarray,
+        side_image: np.ndarray,
+        return_annotated: bool = True,
+    ) -> RealtimeMeasurementResult:
+        """
+        Process two photos for accurate 3D measurement
+
+        Args:
+            top_image: Top-down view for length & width
+            side_image: Side view for height
+            return_annotated: Whether to return annotated images
+        """
+        start_time = time.time()
+
+        # Step 1: Process top view
+        top_result = self.process_frame(
+            top_image, return_annotated=False, view_type="top"
+        )
+
+        if not top_result.objects:
+            return top_result
+
+        # Step 2: Process side view for height
+        side_result = self.process_frame(
+            side_image, return_annotated=False, view_type="side"
+        )
+
+        # Step 3: Combine measurements
+        combined_objects = []
+        pixels_per_cm = top_result.calibration_info.get(
+            "pixels_per_cm", self._default_pixels_per_cm
+        )
+
+        for i, top_obj in enumerate(top_result.objects):
+            height_cm = None
+
+            # Get height from side view if available
+            if side_result.objects:
+                # Use the first side object's height (or match by index)
+                idx = min(i, len(side_result.objects) - 1)
+                height_cm = side_result.objects[idx].height_cm
+
+            combined_objects.append(
+                MeasuredObject3D(
+                    object_id=top_obj.object_id,
+                    object_type=ObjectType.OBJECT_3D
+                    if height_cm
+                    else top_obj.object_type,
+                    label=top_obj.label,
+                    confidence=top_obj.confidence,
+                    length_cm=top_obj.length_cm,
+                    width_cm=top_obj.width_cm,
+                    height_cm=height_cm,
+                    bounding_box=top_obj.bounding_box,
+                    center=top_obj.center,
+                )
+            )
+
+        # Generate combined annotated image (top view with full dimensions)
+        annotated_b64 = None
+        if return_annotated:
+            a4_corners, _ = self._detect_a4_paper(top_image)
+            annotated = self._draw_annotations(
+                top_image, combined_objects, a4_corners, pixels_per_cm, ViewType.TOP
+            )
+            _, buffer = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 85])
+            annotated_b64 = base64.b64encode(buffer).decode("utf-8")
+
+        processing_time = (time.time() - start_time) * 1000
+
+        return RealtimeMeasurementResult(
+            success=True,
+            message=f"3D measurement complete: {len(combined_objects)} object(s)",
+            objects=combined_objects,
+            frame_width=top_image.shape[1],
+            frame_height=top_image.shape[0],
+            processing_time_ms=round(processing_time, 2),
+            annotated_image_base64=annotated_b64,
+            calibration_info={
+                "reference_detected": top_result.calibration_info.get(
+                    "reference_detected", False
+                ),
+                "reference_type": "a4_paper",
+                "pixels_per_cm": float(pixels_per_cm),
+            },
+            view_type="3d_combined",
+        )
 
     def calibrate(
         self,
@@ -754,7 +717,6 @@ class RealtimeProcessor:
         reference_height_cm: float = None,
     ):
         """Manual calibration (optional)"""
-        # Adjust default pixels per cm based on distance
         self._default_pixels_per_cm = (
             40.0 * (30.0 / reference_distance_cm) * scale_factor
         )
@@ -762,9 +724,10 @@ class RealtimeProcessor:
             f"Manual calibration: distance={reference_distance_cm}cm, px/cm={self._default_pixels_per_cm:.2f}"
         )
 
-    def set_reference_type(self, ref_type, custom_width_cm=None, custom_height_cm=None):
-        """For API compatibility - we only use A4 paper"""
-        pass
+    def reset(self):
+        """Reset stored measurements"""
+        self._top_view_objects = []
+        self._top_view_pixels_per_cm = 0
 
 
 # Global processor instance
@@ -772,29 +735,8 @@ _processor: Optional[RealtimeProcessor] = None
 
 
 def get_processor() -> RealtimeProcessor:
-    """Get or create the global processor instance"""
+    """Get or create global processor instance"""
     global _processor
     if _processor is None:
-        _processor = RealtimeProcessor(confidence_threshold=0.35)
+        _processor = RealtimeProcessor()
     return _processor
-
-
-def process_frame_for_measurement(
-    image_data: bytes, return_annotated: bool = True
-) -> RealtimeMeasurementResult:
-    """Process image bytes for measurement"""
-    nparr = np.frombuffer(image_data, np.uint8)
-    image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-
-    if image is None:
-        return RealtimeMeasurementResult(
-            success=False,
-            message="Could not decode image",
-            objects=[],
-            frame_width=0,
-            frame_height=0,
-            processing_time_ms=0,
-        )
-
-    processor = get_processor()
-    return processor.process_frame(image, return_annotated)
