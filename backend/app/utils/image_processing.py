@@ -1,282 +1,330 @@
 """
 Image Processing Utilities for Object Size Measurement
-Converts pixels to real-world measurements using A4 paper as reference
+Uses HuggingFace Space AI model for depth estimation + measurement
+Falls back to local OpenCV processing if HF Space is unavailable
 """
 
 import cv2
 import numpy as np
 from typing import Tuple, List, Optional
 from dataclasses import dataclass
+import base64
+import httpx
+import json
+import logging
+import time
 
+logger = logging.getLogger(__name__)
+
+# HuggingFace Space API URL
+HF_SPACE_URL = "https://loke007-object-measure-ai.hf.space"
 
 @dataclass
 class MeasuredObject:
     """Represents a measured object with its dimensions"""
-
+    object_id: int
+    object_type: str  # "2D" or "3D"
+    label: str
+    confidence: float
+    length_cm: float
     width_cm: float
-    height_cm: float
-    contour_points: List[List[int]]
+    height_cm: Optional[float]
     bounding_box: Tuple[int, int, int, int]  # x, y, w, h
-    corner_points: List[List[int]]  # Reordered corner points
+    center: Tuple[int, int]
 
 
 @dataclass
 class MeasurementResult:
     """Complete measurement result"""
-
     success: bool
     message: str
     objects: List[MeasuredObject]
     reference_detected: bool
     processed_image_base64: Optional[str] = None
+    mode: str = "2d"
+    calibration_info: Optional[dict] = None
 
 
-def get_contours(
-    img: np.ndarray,
-    canny_thresholds: Tuple[int, int] = (100, 100),
-    min_area: int = 1000,
-    corner_filter: int = 0,
-) -> Tuple[np.ndarray, List]:
+def measure_objects_via_hf(
+    image_base64: str,
+    mode: str = "2d",
+    camera_distance_cm: float = 30.0,
+) -> MeasurementResult:
     """
-    Detect contours in an image using edge detection.
-
-    Args:
-        img: Input BGR image
-        canny_thresholds: (low, high) thresholds for Canny edge detection
-        min_area: Minimum contour area to consider
-        corner_filter: If > 0, only return contours with exactly this many corners
-
-    Returns:
-        Tuple of (image, list of contour data)
-        Each contour data: [corner_count, area, approx_points, bounding_box, raw_contour]
+    Measure objects by calling the HuggingFace Space API.
     """
-    img_gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    img_blur = cv2.GaussianBlur(img_gray, (5, 5), 1)
-    img_canny = cv2.Canny(img_blur, canny_thresholds[0], canny_thresholds[1])
+    try:
+        logger.info(f"Calling HF Space for measurement (mode={mode}, dist={camera_distance_cm}cm)")
+        start_time = time.time()
 
-    kernel = np.ones((5, 5))
-    img_dilated = cv2.dilate(img_canny, kernel, iterations=3)
-    img_threshold = cv2.erode(img_dilated, kernel, iterations=2)
+        # Call Gradio API
+        # Gradio API endpoint format
+        api_url = f"{HF_SPACE_URL}/api/predict"
+        
+        # Prepare the image as data URL
+        if not image_base64.startswith("data:"):
+            img_data_url = f"data:image/jpeg;base64,{image_base64}"
+        else:
+            img_data_url = image_base64
 
-    contours, _ = cv2.findContours(
-        img_threshold, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
-    )
+        payload = {
+            "data": [
+                img_data_url,  # image
+                mode,          # mode
+                camera_distance_cm,  # distance
+            ]
+        }
 
-    final_contours = []
-    for contour in contours:
+        with httpx.Client(timeout=120.0) as client:
+            response = client.post(api_url, json=payload)
+            response.raise_for_status()
+
+        result = response.json()
+        elapsed = time.time() - start_time
+        logger.info(f"HF Space responded in {elapsed:.1f}s")
+
+        # Parse result
+        data = result.get("data", [])
+        if len(data) < 2:
+            return MeasurementResult(
+                success=False,
+                message="Invalid response from AI model",
+                objects=[],
+                reference_detected=False,
+            )
+
+        # data[0] = annotated image (base64 data URL or path)
+        # data[1] = JSON string with measurements
+        annotated_img_data = data[0]
+        measurements_json = json.loads(data[1])
+
+        # Extract annotated image base64
+        processed_image = None
+        if annotated_img_data:
+            if isinstance(annotated_img_data, dict) and "url" in annotated_img_data:
+                # Gradio returns a URL - download it
+                img_url = annotated_img_data["url"]
+                if not img_url.startswith("http"):
+                    img_url = f"{HF_SPACE_URL}{img_url}"
+                with httpx.Client(timeout=30.0) as client:
+                    img_resp = client.get(img_url)
+                    processed_image = base64.b64encode(img_resp.content).decode("utf-8")
+            elif isinstance(annotated_img_data, str) and annotated_img_data.startswith("data:"):
+                processed_image = annotated_img_data.split(",", 1)[1]
+
+        # Build measured objects
+        measured_objects = []
+        for obj in measurements_json.get("objects", []):
+            measured_objects.append(
+                MeasuredObject(
+                    object_id=obj.get("id", 0),
+                    object_type=obj.get("object_type", "2D"),
+                    label=obj.get("label", "Object"),
+                    confidence=obj.get("confidence", 0.5),
+                    length_cm=obj.get("length_cm", 0),
+                    width_cm=obj.get("width_cm", 0),
+                    height_cm=obj.get("height_cm"),
+                    bounding_box=tuple(obj.get("bbox", (0, 0, 0, 0))),
+                    center=tuple(obj.get("center", (0, 0))),
+                )
+            )
+
+        return MeasurementResult(
+            success=measurements_json.get("success", True),
+            message=measurements_json.get("message", f"Measured {len(measured_objects)} object(s)"),
+            objects=measured_objects,
+            reference_detected=True,
+            processed_image_base64=processed_image,
+            mode=mode,
+            calibration_info={
+                "method": "ai_depth_estimation",
+                "camera_distance_cm": camera_distance_cm,
+                "model": "Depth-Anything-V2",
+            },
+        )
+
+    except httpx.TimeoutException:
+        logger.warning("HF Space timeout, falling back to local processing")
+        return None  # Signal to use fallback
+    except Exception as e:
+        logger.error(f"HF Space error: {e}")
+        return None  # Signal to use fallback
+
+
+def measure_objects_local(
+    image: np.ndarray,
+    mode: str = "2d",
+    camera_distance_cm: float = 30.0,
+) -> MeasurementResult:
+    """
+    Local fallback: measure objects using only OpenCV (no AI model).
+    Uses edge detection + pinhole camera model.
+    """
+    h, w = image.shape[:2]
+    
+    # Camera model
+    focal_px = w * 0.70
+    cm_per_px = camera_distance_cm / focal_px
+
+    # Object detection
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+    enhanced = clahe.apply(gray)
+    blurred = cv2.GaussianBlur(enhanced, (5, 5), 1)
+
+    kernel = np.ones((5, 5), np.uint8)
+    all_contours = []
+
+    # Edge detection
+    edges = cv2.Canny(blurred, 40, 120)
+    edges = cv2.dilate(edges, kernel, iterations=2)
+    edges = cv2.erode(edges, kernel, iterations=1)
+    c1, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    all_contours.extend(c1)
+
+    # Otsu threshold
+    _, otsu = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    otsu = cv2.morphologyEx(otsu, cv2.MORPH_CLOSE, kernel, iterations=2)
+    c2, _ = cv2.findContours(otsu, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    all_contours.extend(c2)
+
+    all_contours = sorted(all_contours, key=cv2.contourArea, reverse=True)
+
+    min_area = w * h * 0.005
+    max_area = w * h * 0.85
+    detected_regions = []
+    measured_objects = []
+    annotated = image.copy()
+
+    for contour in all_contours[:30]:
         area = cv2.contourArea(contour)
-        if area > min_area:
-            perimeter = cv2.arcLength(contour, True)
-            approx = cv2.approxPolyDP(contour, 0.02 * perimeter, True)
-            bbox = cv2.boundingRect(approx)
+        if area < min_area or area > max_area:
+            continue
 
-            if corner_filter > 0:
-                if len(approx) == corner_filter:
-                    final_contours.append([len(approx), area, approx, bbox, contour])
-            else:
-                final_contours.append([len(approx), area, approx, bbox, contour])
+        x, y, bw, bh = cv2.boundingRect(contour)
+        aspect = max(bw, bh) / max(1, min(bw, bh))
+        if aspect > 10:
+            continue
 
-    # Sort by area (largest first)
-    final_contours = sorted(final_contours, key=lambda x: x[1], reverse=True)
+        margin = 5
+        if x < margin or y < margin or x + bw > w - margin or y + bh > h - margin:
+            continue
 
-    return img, final_contours
+        # Duplicate check
+        is_dup = False
+        for rx, ry, rw, rh in detected_regions:
+            ox = max(0, min(x + bw, rx + rw) - max(x, rx))
+            oy = max(0, min(y + bh, ry + rh) - max(y, ry))
+            overlap = ox * oy
+            union = bw * bh + rw * rh - overlap
+            if overlap / max(1, union) > 0.3:
+                is_dup = True
+                break
+        if is_dup:
+            continue
 
+        detected_regions.append((x, y, bw, bh))
 
-def reorder_points(points: np.ndarray) -> np.ndarray:
-    """
-    Reorder 4 corner points to consistent order:
-    [top-left, top-right, bottom-left, bottom-right]
+        rect = cv2.minAreaRect(contour)
+        rect_w, rect_h = rect[1]
+        if rect_w < rect_h:
+            rect_w, rect_h = rect_h, rect_w
 
-    Args:
-        points: Array of 4 points
+        length_cm = round(max(0.3, rect_w * cm_per_px), 1)
+        width_cm = round(max(0.3, rect_h * cm_per_px), 1)
+        if length_cm < width_cm:
+            length_cm, width_cm = width_cm, length_cm
 
-    Returns:
-        Reordered points array
-    """
-    points_new = np.zeros_like(points)
-    points = points.reshape((4, 2))
+        # 3D height estimation from image features
+        height_cm = None
+        if mode == "3d":
+            roi = gray[y:y+bh, x:x+bw]
+            if roi.size > 0:
+                texture_var = np.var(roi)
+                sobelx = cv2.Sobel(roi, cv2.CV_64F, 1, 0, ksize=3)
+                sobely = cv2.Sobel(roi, cv2.CV_64F, 0, 1, ksize=3)
+                grad_mean = np.mean(np.sqrt(sobelx**2 + sobely**2))
+                depth_factor = min(1.0, (texture_var / 2000) * 0.3 + (grad_mean / 50) * 0.7)
+                min_dim = min(length_cm, width_cm)
+                height_cm = round(max(0.3, min_dim * (0.2 + depth_factor * 0.5)), 1)
 
-    # Sum of coordinates: smallest = top-left, largest = bottom-right
-    point_sum = points.sum(1)
-    points_new[0] = points[np.argmin(point_sum)]  # Top-left
-    points_new[3] = points[np.argmax(point_sum)]  # Bottom-right
+        obj_id = len(measured_objects) + 1
+        obj_type = "3D" if height_cm else "2D"
+        color = (0, 255, 0) if obj_type == "3D" else (255, 165, 0)
+        bg_color = (0, 160, 0) if obj_type == "3D" else (200, 130, 0)
 
-    # Difference of coordinates: smallest = top-right, largest = bottom-left
-    point_diff = np.diff(points, axis=1)
-    points_new[1] = points[np.argmin(point_diff)]  # Top-right
-    points_new[2] = points[np.argmax(point_diff)]  # Bottom-left
+        cv2.rectangle(annotated, (x, y), (x + bw, y + bh), color, 2)
 
-    return points_new
+        label = f"{obj_type}: Object {obj_id}"
+        if height_cm:
+            dims = f"L:{length_cm} W:{width_cm} H:{height_cm} cm"
+        else:
+            dims = f"L:{length_cm} x W:{width_cm} cm"
 
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        (tw, th_), _ = cv2.getTextSize(label, font, 0.55, 2)
+        cv2.rectangle(annotated, (x, y - th_ - 10), (x + tw + 8, y), bg_color, -1)
+        cv2.putText(annotated, label, (x + 4, y - 5), font, 0.55, (255, 255, 255), 2)
 
-def warp_image(
-    img: np.ndarray, points: np.ndarray, width: int, height: int, padding: int = 20
-) -> np.ndarray:
-    """
-    Apply perspective transformation to get bird's eye view.
+        (dw, dh), _ = cv2.getTextSize(dims, font, 0.55, 2)
+        cv2.rectangle(annotated, (x, y + bh), (x + dw + 8, y + bh + dh + 10), bg_color, -1)
+        cv2.putText(annotated, dims, (x + 4, y + bh + dh + 5), font, 0.55, (255, 255, 255), 2)
 
-    Args:
-        img: Input image
-        points: 4 corner points of the region to transform
-        width: Output width
-        height: Output height
-        padding: Padding to remove from edges
+        measured_objects.append(
+            MeasuredObject(
+                object_id=obj_id,
+                object_type=obj_type,
+                label=f"Object {obj_id}",
+                confidence=0.7,
+                length_cm=length_cm,
+                width_cm=width_cm,
+                height_cm=height_cm,
+                bounding_box=(x, y, bw, bh),
+                center=(x + bw // 2, y + bh // 2),
+            )
+        )
 
-    Returns:
-        Warped image
-    """
-    points = reorder_points(points)
-    pts1 = np.float32(points)
-    pts2 = np.float32([[0, 0], [width, 0], [0, height], [width, height]])
+        if len(measured_objects) >= 10:
+            break
 
-    matrix = cv2.getPerspectiveTransform(pts1, pts2)
-    img_warp = cv2.warpPerspective(img, matrix, (width, height))
+    # Status
+    cv2.putText(annotated, f"Mode: {mode.upper()} | Dist: {camera_distance_cm}cm (Local)", 
+                (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
 
-    # Remove padding from edges
-    if padding > 0:
-        img_warp = img_warp[
-            padding : img_warp.shape[0] - padding, padding : img_warp.shape[1] - padding
-        ]
+    _, buffer = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 85])
+    processed_image = base64.b64encode(buffer).decode("utf-8")
 
-    return img_warp
+    msg = f"Measured {len(measured_objects)} object(s)" if measured_objects else "No objects detected"
 
-
-def calculate_distance(pt1: np.ndarray, pt2: np.ndarray) -> float:
-    """Calculate Euclidean distance between two points."""
-    return float(((pt2[0] - pt1[0]) ** 2 + (pt2[1] - pt1[1]) ** 2) ** 0.5)
+    return MeasurementResult(
+        success=True,
+        message=msg,
+        objects=measured_objects,
+        reference_detected=False,
+        processed_image_base64=processed_image,
+        mode=mode,
+        calibration_info={
+            "method": "local_opencv",
+            "camera_distance_cm": camera_distance_cm,
+        },
+    )
 
 
 def measure_objects(
     image: np.ndarray,
-    scale: int = 3,
-    reference_width_mm: int = 210,
-    reference_height_mm: int = 297,
+    mode: str = "2d",
+    camera_distance_cm: float = 30.0,
+    image_base64: Optional[str] = None,
 ) -> MeasurementResult:
     """
-    Main function to measure objects in an image using A4 paper as reference.
-
-    Args:
-        image: Input BGR image
-        scale: Scale factor for processing
-        reference_width_mm: Reference object width in mm (A4 = 210mm)
-        reference_height_mm: Reference object height in mm (A4 = 297mm)
-
-    Returns:
-        MeasurementResult with all measured objects
+    Main measurement function. Tries HF Space first, falls back to local processing.
     """
-    # Calculate warped image dimensions (in pixels, scaled)
-    warp_width = reference_width_mm * scale
-    warp_height = reference_height_mm * scale
+    # Try HF Space AI model first
+    if image_base64:
+        result = measure_objects_via_hf(image_base64, mode, camera_distance_cm)
+        if result is not None:
+            return result
+        logger.info("HF Space unavailable, using local processing")
 
-    # Step 1: Find the reference paper (A4) - looking for 4-sided shapes
-    _, contours = get_contours(image, min_area=50000, corner_filter=4)
-
-    if len(contours) == 0:
-        return MeasurementResult(
-            success=False,
-            message="No A4 paper detected. Please ensure the paper is clearly visible with good lighting.",
-            objects=[],
-            reference_detected=False,
-        )
-
-    # Get the largest 4-sided contour (should be the A4 paper)
-    biggest_contour = contours[0][2]
-
-    # Step 2: Warp perspective to get bird's eye view of the paper
-    img_warped = warp_image(image, biggest_contour, warp_width, warp_height)
-
-    # Step 3: Find objects on the paper
-    img_result, object_contours = get_contours(
-        img_warped, min_area=2000, corner_filter=4, canny_thresholds=(50, 50)
-    )
-
-    measured_objects = []
-
-    for obj in object_contours:
-        approx_points = obj[2]
-        bbox = obj[3]
-
-        # Reorder corner points
-        corner_points = reorder_points(approx_points)
-
-        # Calculate dimensions in cm (divide by scale to get mm, then by 10 for cm)
-        width_cm = round(
-            calculate_distance(corner_points[0][0] / scale, corner_points[1][0] / scale)
-            / 10,
-            1,
-        )
-        height_cm = round(
-            calculate_distance(corner_points[0][0] / scale, corner_points[2][0] / scale)
-            / 10,
-            1,
-        )
-
-        # Draw on result image
-        cv2.polylines(img_result, [approx_points], True, (0, 255, 0), 2)
-
-        # Draw measurement arrows
-        cv2.arrowedLine(
-            img_result,
-            tuple(corner_points[0][0]),
-            tuple(corner_points[1][0]),
-            (255, 0, 255),
-            3,
-            8,
-            0,
-            0.05,
-        )
-        cv2.arrowedLine(
-            img_result,
-            tuple(corner_points[0][0]),
-            tuple(corner_points[2][0]),
-            (255, 0, 255),
-            3,
-            8,
-            0,
-            0.05,
-        )
-
-        # Add measurement text
-        x, y, w, h = bbox
-        cv2.putText(
-            img_result,
-            f"{width_cm}cm",
-            (x + 30, y - 10),
-            cv2.FONT_HERSHEY_COMPLEX_SMALL,
-            1.5,
-            (255, 0, 255),
-            2,
-        )
-        cv2.putText(
-            img_result,
-            f"{height_cm}cm",
-            (x - 70, y + h // 2),
-            cv2.FONT_HERSHEY_COMPLEX_SMALL,
-            1.5,
-            (255, 0, 255),
-            2,
-        )
-
-        measured_objects.append(
-            MeasuredObject(
-                width_cm=width_cm,
-                height_cm=height_cm,
-                contour_points=approx_points.tolist(),
-                bounding_box=bbox,
-                corner_points=corner_points.tolist(),
-            )
-        )
-
-    # Convert result image to base64
-    import base64
-
-    _, buffer = cv2.imencode(".jpg", img_result, [cv2.IMWRITE_JPEG_QUALITY, 90])
-    img_base64 = base64.b64encode(buffer).decode("utf-8")
-
-    return MeasurementResult(
-        success=True,
-        message=f"Successfully measured {len(measured_objects)} object(s)",
-        objects=measured_objects,
-        reference_detected=True,
-        processed_image_base64=img_base64,
-    )
+    # Fallback to local OpenCV processing
+    return measure_objects_local(image, mode, camera_distance_cm)

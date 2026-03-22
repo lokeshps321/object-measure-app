@@ -6,9 +6,15 @@
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
 export interface MeasuredObject {
+  object_id: number;
+  object_type: string; // "2D" or "3D"
+  label: string;
+  confidence: number;
+  length_cm: number;
   width_cm: number;
-  height_cm: number;
+  height_cm: number | null;
   bounding_box: [number, number, number, number];
+  center: [number, number] | null;
 }
 
 export interface MeasurementResponse {
@@ -17,6 +23,8 @@ export interface MeasurementResponse {
   reference_detected: boolean;
   objects: MeasuredObject[];
   processed_image: string | null;
+  mode: string;
+  calibration_info: Record<string, unknown> | null;
 }
 
 export interface ApiError {
@@ -25,16 +33,22 @@ export interface ApiError {
 
 /**
  * Send image for measurement processing
- * @param imageBase64 - Base64 encoded image (with or without data URL prefix)
- * @returns Measurement results
  */
-export async function measureImage(imageBase64: string): Promise<MeasurementResponse> {
+export async function measureImage(
+  imageBase64: string,
+  mode: string = '2d',
+  cameraDistanceCm: number = 30
+): Promise<MeasurementResponse> {
   const response = await fetch(`${API_BASE_URL}/api/v1/measure/base64`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify({ image: imageBase64 }),
+    body: JSON.stringify({
+      image: imageBase64,
+      mode: mode,
+      camera_distance_cm: cameraDistanceCm,
+    }),
   });
 
   if (!response.ok) {
