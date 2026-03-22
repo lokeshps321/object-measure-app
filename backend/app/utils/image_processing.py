@@ -191,7 +191,7 @@ def measure_objects_local(
     all_contours = sorted(all_contours, key=cv2.contourArea, reverse=True)
 
     min_area = w * h * 0.005
-    max_area = w * h * 0.85
+    max_area = w * h * 0.99  # Allow very large objects
     detected_regions = []
     measured_objects = []
     annotated = image.copy()
@@ -203,10 +203,11 @@ def measure_objects_local(
 
         x, y, bw, bh = cv2.boundingRect(contour)
         aspect = max(bw, bh) / max(1, min(bw, bh))
-        if aspect > 10:
+        if aspect > 15:  # more relaxed aspect ratio
             continue
 
-        margin = 5
+        # More relaxed margin
+        margin = 0
         if x < margin or y < margin or x + bw > w - margin or y + bh > h - margin:
             continue
 
