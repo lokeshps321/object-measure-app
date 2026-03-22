@@ -41,6 +41,7 @@ class MeasurementResult:
     objects: List[MeasuredObject]
     reference_detected: bool
     processed_image_base64: Optional[str] = None
+    processed_side_image_base64: Optional[str] = None
     mode: str = "2d"
     calibration_info: Optional[dict] = None
 
