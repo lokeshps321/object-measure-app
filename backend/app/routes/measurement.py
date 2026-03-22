@@ -48,35 +48,51 @@ async def measure_base64(data: MeasurementRequest):
 
     try:
         image_data = data.image
+        side_image_data = data.side_image
         mode = data.mode or "2d"
         camera_distance_cm = data.camera_distance_cm or 30.0
+        side_camera_distance_cm = data.side_camera_distance_cm or camera_distance_cm
 
         # Remove data URL prefix if present
         raw_base64 = image_data
         if "," in image_data:
             raw_base64 = image_data.split(",")[1]
 
+        raw_side_base64 = None
+        if side_image_data:
+            raw_side_base64 = side_image_data
+            if "," in side_image_data:
+                raw_side_base64 = side_image_data.split(",")[1]
+
         # Decode base64
         try:
             image_bytes = base64.b64decode(raw_base64)
+            side_image_bytes = base64.b64decode(raw_side_base64) if raw_side_base64 else None
         except Exception:
             raise HTTPException(status_code=400, detail="Invalid base64 encoding")
 
         # Convert to numpy array
         nparr = np.frombuffer(image_bytes, np.uint8)
         image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        
+        side_image = None
+        if side_image_bytes:
+            nparr_side = np.frombuffer(side_image_bytes, np.uint8)
+            side_image = cv2.imdecode(nparr_side, cv2.IMREAD_COLOR)
 
         if image is None:
             raise HTTPException(
                 status_code=400, detail="Could not decode image from base64 data"
             )
 
-        # Process the image (tries HF Space first, falls back to local)
+        # Process the image
         result = measure_objects(
             image=image,
             mode=mode,
             camera_distance_cm=camera_distance_cm,
             image_base64=raw_base64,
+            side_image=side_image,
+            side_camera_distance_cm=side_camera_distance_cm
         )
 
         # Build response

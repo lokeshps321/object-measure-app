@@ -71,9 +71,11 @@ class MeasurementResponse(BaseModel):
 
 class MeasurementRequest(BaseModel):
     """Request body for measurement"""
-    image: str = Field(..., description="Base64 encoded image")
+    image: str = Field(..., description="Base64 encoded image (Top view)")
+    side_image: Optional[str] = Field(None, description="Base64 encoded image (Side view for 3D)")
     mode: str = Field(default="2d", description="Measurement mode: 2d or 3d")
-    camera_distance_cm: float = Field(default=30.0, description="Camera distance in cm")
+    camera_distance_cm: float = Field(default=30.0, description="Camera distance for top view in cm")
+    side_camera_distance_cm: Optional[float] = Field(None, description="Camera distance for side view in cm")
 
 
 class HealthResponse(BaseModel):

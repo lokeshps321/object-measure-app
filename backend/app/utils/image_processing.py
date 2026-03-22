@@ -155,6 +155,8 @@ def measure_objects_local(
     image: np.ndarray,
     mode: str = "2d",
     camera_distance_cm: float = 30.0,
+    side_image: Optional[np.ndarray] = None,
+    side_camera_distance_cm: float = 30.0,
 ) -> MeasurementResult:
     """
     Local fallback: measure objects using only OpenCV (no AI model).
@@ -166,7 +168,43 @@ def measure_objects_local(
     focal_px = w * 0.70
     cm_per_px = camera_distance_cm / focal_px
 
-    # Object detection
+    # Calculate actual Height from Side View if provided
+    actual_height_cm = None
+    if mode == "3d" and side_image is not None:
+        sh, sw = side_image.shape[:2]
+        sfocal_px = sw * 0.70
+        scm_per_px = side_camera_distance_cm / sfocal_px
+
+        sgray = cv2.cvtColor(side_image, cv2.COLOR_BGR2GRAY)
+        sclahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+        senhanced = sclahe.apply(sgray)
+        sblurred = cv2.GaussianBlur(senhanced, (5, 5), 1)
+
+        skernel = np.ones((5, 5), np.uint8)
+        sall_contours = []
+
+        sedges = cv2.Canny(sblurred, 40, 120)
+        sedges = cv2.dilate(sedges, skernel, iterations=2)
+        sc1, _ = cv2.findContours(sedges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        sall_contours.extend(sc1)
+
+        _, sotsu = cv2.threshold(sblurred, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        sotsu = cv2.morphologyEx(sotsu, cv2.MORPH_CLOSE, skernel, iterations=2)
+        sc2, _ = cv2.findContours(sotsu, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        sall_contours.extend(sc2)
+
+        sall_contours = sorted(sall_contours, key=cv2.contourArea, reverse=True)
+        
+        # Take the largest contour in side view as the object to measure height
+        for contour in sall_contours:
+            sarea = cv2.contourArea(contour)
+            if sarea > sw * sh * 0.005:
+                sx, sy, sbw, sbh = cv2.boundingRect(contour)
+                # The vertical height of the bounding box represents the physical height 
+                actual_height_cm = round(max(0.3, sbh * scm_per_px), 1)
+                break
+
+    # Object detection (Top View)
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
     enhanced = clahe.apply(gray)
@@ -236,18 +274,22 @@ def measure_objects_local(
         if length_cm < width_cm:
             length_cm, width_cm = width_cm, length_cm
 
-        # 3D height estimation from image features
+        # 3D height assignment
         height_cm = None
         if mode == "3d":
-            roi = gray[y:y+bh, x:x+bw]
-            if roi.size > 0:
-                texture_var = np.var(roi)
-                sobelx = cv2.Sobel(roi, cv2.CV_64F, 1, 0, ksize=3)
-                sobely = cv2.Sobel(roi, cv2.CV_64F, 0, 1, ksize=3)
-                grad_mean = np.mean(np.sqrt(sobelx**2 + sobely**2))
-                depth_factor = min(1.0, (texture_var / 2000) * 0.3 + (grad_mean / 50) * 0.7)
-                min_dim = min(length_cm, width_cm)
-                height_cm = round(max(0.3, min_dim * (0.2 + depth_factor * 0.5)), 1)
+            if actual_height_cm is not None:
+                height_cm = actual_height_cm
+            else:
+                # Estimate if side view not provided
+                roi = gray[y:y+bh, x:x+bw]
+                if roi.size > 0:
+                    texture_var = np.var(roi)
+                    sobelx = cv2.Sobel(roi, cv2.CV_64F, 1, 0, ksize=3)
+                    sobely = cv2.Sobel(roi, cv2.CV_64F, 0, 1, ksize=3)
+                    grad_mean = np.mean(np.sqrt(sobelx**2 + sobely**2))
+                    depth_factor = min(1.0, (texture_var / 2000) * 0.3 + (grad_mean / 50) * 0.7)
+                    min_dim = min(length_cm, width_cm)
+                    height_cm = round(max(0.3, min_dim * (0.2 + depth_factor * 0.5)), 1)
 
         obj_id = len(measured_objects) + 1
         obj_type = "3D" if height_cm else "2D"
@@ -289,8 +331,11 @@ def measure_objects_local(
             break
 
     # Status
-    cv2.putText(annotated, f"Mode: {mode.upper()} | Dist: {camera_distance_cm}cm (Local)", 
+    cv2.putText(annotated, f"Mode: {mode.upper()} | Top Dist: {camera_distance_cm}cm", 
                 (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+    if actual_height_cm:
+        cv2.putText(annotated, f"Side Dist: {side_camera_distance_cm}cm (True 3D)", 
+                    (10, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
 
     _, buffer = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 85])
     processed_image = base64.b64encode(buffer).decode("utf-8")
@@ -305,8 +350,9 @@ def measure_objects_local(
         processed_image_base64=processed_image,
         mode=mode,
         calibration_info={
-            "method": "local_opencv",
+            "method": "local_opencv_2_views" if actual_height_cm else "local_opencv",
             "camera_distance_cm": camera_distance_cm,
+            "side_camera_distance_cm": side_camera_distance_cm
         },
     )
 
@@ -316,16 +362,11 @@ def measure_objects(
     mode: str = "2d",
     camera_distance_cm: float = 30.0,
     image_base64: Optional[str] = None,
+    side_image: Optional[np.ndarray] = None,
+    side_camera_distance_cm: float = 30.0,
 ) -> MeasurementResult:
     """
-    Main measurement function. Tries HF Space first, falls back to local processing.
+    Main measurement function. Always use local 2-view processing for perfection.
     """
-    # Try HF Space AI model first
-    if image_base64:
-        result = measure_objects_via_hf(image_base64, mode, camera_distance_cm)
-        if result is not None:
-            return result
-        logger.info("HF Space unavailable, using local processing")
-
-    # Fallback to local OpenCV processing
-    return measure_objects_local(image, mode, camera_distance_cm)
+    # Overriding HF space completely in favor of robust 2-view OpenCV approach
+    return measure_objects_local(image, mode, camera_distance_cm, side_image, side_camera_distance_cm)
