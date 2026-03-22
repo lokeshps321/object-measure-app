@@ -165,16 +165,15 @@ def measure_objects_local(
     """
     h, w = image.shape[:2]
     
-    # Camera model - calibrated for typical phone camera (~60 degree FOV)
-    # focal_px = w / (2 * tan(FOV/2)) ~ w * 1.15 for ~47deg half-angle
-    focal_px = w * 1.15
+    # Camera model
+    focal_px = w * 0.70
     cm_per_px = camera_distance_cm / focal_px
 
     # Calculate actual Height from Side View if provided
     actual_height_cm = None
     if mode == "3d" and side_image is not None:
         sh, sw = side_image.shape[:2]
-        sfocal_px = sw * 1.15
+        sfocal_px = sw * 0.70
         scm_per_px = side_camera_distance_cm / sfocal_px
 
         sgray = cv2.cvtColor(side_image, cv2.COLOR_BGR2GRAY)
@@ -216,7 +215,7 @@ def measure_objects_local(
     all_contours = []
 
     # Edge detection
-    edges = cv2.Canny(blurred, 30, 100)
+    edges = cv2.Canny(blurred, 40, 120)
     edges = cv2.dilate(edges, kernel, iterations=2)
     edges = cv2.erode(edges, kernel, iterations=1)
     c1, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -228,15 +227,9 @@ def measure_objects_local(
     c2, _ = cv2.findContours(otsu, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     all_contours.extend(c2)
 
-    # Adaptive threshold (helps with close-up images)
-    adaptive = cv2.adaptiveThreshold(blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 21, 5)
-    adaptive = cv2.morphologyEx(adaptive, cv2.MORPH_CLOSE, kernel, iterations=2)
-    c3, _ = cv2.findContours(adaptive, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    all_contours.extend(c3)
-
     all_contours = sorted(all_contours, key=cv2.contourArea, reverse=True)
 
-    min_area = w * h * 0.003  # Lower threshold for close-up detection
+    min_area = w * h * 0.005
     max_area = w * h * 0.99  # Allow very large objects
     detected_regions = []
     measured_objects = []
