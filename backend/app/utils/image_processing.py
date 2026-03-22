@@ -41,7 +41,6 @@ class MeasurementResult:
     objects: List[MeasuredObject]
     reference_detected: bool
     processed_image_base64: Optional[str] = None
-    processed_side_image_base64: Optional[str] = None
     mode: str = "2d"
     calibration_info: Optional[dict] = None
 
@@ -171,7 +170,6 @@ def measure_objects_local(
 
     # Calculate actual Height from Side View if provided
     actual_height_cm = None
-    processed_side_image = None
     if mode == "3d" and side_image is not None:
         sh, sw = side_image.shape[:2]
         sfocal_px = sw * 0.70
@@ -204,19 +202,6 @@ def measure_objects_local(
                 sx, sy, sbw, sbh = cv2.boundingRect(contour)
                 # The vertical height of the bounding box represents the physical height 
                 actual_height_cm = round(max(0.3, sbh * scm_per_px), 1)
-                
-                sannotated = side_image.copy()
-                cv2.rectangle(sannotated, (sx, sy), (sx + sbw, sy + sbh), (0, 255, 0), 4)
-                
-                slabel = f"True Height: {actual_height_cm}cm"
-                font = cv2.FONT_HERSHEY_SIMPLEX
-                (stw, sth_), _ = cv2.getTextSize(slabel, font, 0.8, 2)
-                cv2.rectangle(sannotated, (sx, sy - sth_ - 15), (sx + stw + 10, sy), (0, 160, 0), -1)
-                cv2.putText(sannotated, slabel, (sx + 5, sy - 7), font, 0.8, (255, 255, 255), 2)
-                
-                # Encode side image
-                _, sbuffer = cv2.imencode(".jpg", sannotated, [cv2.IMWRITE_JPEG_QUALITY, 85])
-                processed_side_image = base64.b64encode(sbuffer).decode("utf-8")
                 break
 
     # Object detection (Top View)
@@ -363,7 +348,6 @@ def measure_objects_local(
         objects=measured_objects,
         reference_detected=False,
         processed_image_base64=processed_image,
-        processed_side_image_base64=processed_side_image,
         mode=mode,
         calibration_info={
             "method": "local_opencv_2_views" if actual_height_cm else "local_opencv",
