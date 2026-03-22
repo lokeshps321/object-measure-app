@@ -4,14 +4,10 @@ Pydantic models for API request/response schemas
 
 from pydantic import BaseModel, Field
 from typing import List, Optional, Tuple
-from enum import Enum
-
-
-# ============== Legacy Schemas (for backward compatibility) ==============
 
 
 class MeasuredObjectResponse(BaseModel):
-    """Single measured object data (legacy 2D only)"""
+    """Single measured object data"""
 
     width_cm: float = Field(..., description="Width in centimeters")
     height_cm: float = Field(..., description="Height in centimeters")
@@ -30,7 +26,7 @@ class MeasuredObjectResponse(BaseModel):
 
 
 class MeasurementResponse(BaseModel):
-    """Response from measurement endpoint (legacy)"""
+    """Response from measurement endpoint"""
 
     success: bool = Field(..., description="Whether measurement was successful")
     message: str = Field(..., description="Status message")
@@ -56,203 +52,15 @@ class MeasurementResponse(BaseModel):
                         "height_cm": 5.4,
                         "bounding_box": [100, 150, 255, 162],
                     },
+                    {
+                        "width_cm": 12.0,
+                        "height_cm": 7.5,
+                        "bounding_box": [400, 200, 360, 225],
+                    },
                 ],
                 "processed_image": "base64_encoded_string...",
             }
         }
-
-
-# ============== New Realtime 2D/3D Schemas ==============
-
-
-class ObjectType(str, Enum):
-    """Type of detected object"""
-
-    OBJECT_2D = "2D"
-    OBJECT_3D = "3D"
-
-
-class MeasuredObject3DResponse(BaseModel):
-    """Single measured object with 2D or 3D dimensions"""
-
-    object_id: int = Field(..., description="Unique object ID in frame")
-    object_type: ObjectType = Field(..., description="2D or 3D object type")
-    label: str = Field(..., description="Detected object label (e.g., 'book', 'box')")
-    confidence: float = Field(..., description="Detection confidence (0-1)")
-
-    # Dimensions
-    length_cm: float = Field(..., description="Length in centimeters")
-    width_cm: float = Field(..., description="Width in centimeters")
-    height_cm: Optional[float] = Field(
-        None, description="Height in cm (only for 3D objects)"
-    )
-
-    # Position
-    bounding_box: Tuple[int, int, int, int] = Field(
-        ..., description="(x, y, width, height) in pixels"
-    )
-    center: Tuple[int, int] = Field(..., description="Center point (x, y)")
-
-    class Config:
-        json_schema_extra = {
-            "example": {
-                "object_id": 1,
-                "object_type": "3D",
-                "label": "box",
-                "confidence": 0.92,
-                "length_cm": 15.5,
-                "width_cm": 10.2,
-                "height_cm": 8.0,
-                "bounding_box": [100, 150, 200, 130],
-                "center": [200, 215],
-            }
-        }
-
-
-class CalibrationInfo(BaseModel):
-    """Calibration information"""
-
-    reference_detected: bool = Field(
-        ..., description="Whether reference object was detected"
-    )
-    reference_type: str = Field(
-        ..., description="Type of reference (credit_card, a4_paper, custom, none)"
-    )
-    pixels_per_cm: float = Field(..., description="Calculated pixels per centimeter")
-    reference_width_cm: Optional[float] = Field(
-        None, description="Reference object width"
-    )
-    reference_height_cm: Optional[float] = Field(
-        None, description="Reference object height"
-    )
-
-
-class RealtimeMeasurementResponse(BaseModel):
-    """Response from real-time measurement endpoint"""
-
-    success: bool = Field(..., description="Whether processing was successful")
-    message: str = Field(..., description="Status message")
-    objects: List[MeasuredObject3DResponse] = Field(
-        default=[], description="List of measured objects"
-    )
-    frame_width: int = Field(..., description="Input frame width")
-    frame_height: int = Field(..., description="Input frame height")
-    processing_time_ms: float = Field(
-        ..., description="Processing time in milliseconds"
-    )
-    annotated_image: Optional[str] = Field(
-        None, description="Base64 encoded annotated image"
-    )
-    calibration_info: Optional[CalibrationInfo] = Field(
-        None, description="Calibration information"
-    )
-
-    class Config:
-        json_schema_extra = {
-            "example": {
-                "success": True,
-                "message": "Measured 2 object(s)",
-                "objects": [
-                    {
-                        "object_id": 1,
-                        "object_type": "3D",
-                        "label": "box",
-                        "confidence": 0.92,
-                        "length_cm": 15.5,
-                        "width_cm": 10.2,
-                        "height_cm": 8.0,
-                        "bounding_box": [100, 150, 200, 130],
-                        "center": [200, 215],
-                    },
-                    {
-                        "object_id": 2,
-                        "object_type": "2D",
-                        "label": "book",
-                        "confidence": 0.88,
-                        "length_cm": 21.0,
-                        "width_cm": 29.7,
-                        "height_cm": None,
-                        "bounding_box": [350, 200, 250, 350],
-                        "center": [475, 375],
-                    },
-                ],
-                "frame_width": 1920,
-                "frame_height": 1080,
-                "processing_time_ms": 156.5,
-                "annotated_image": "base64_encoded_string...",
-            }
-        }
-
-
-class RealtimeMeasurementRequest(BaseModel):
-    """Request body for real-time measurement"""
-
-    image: str = Field(..., description="Base64 encoded image")
-    return_annotated: bool = Field(
-        default=True, description="Whether to return annotated image"
-    )
-    calibration_distance_cm: Optional[float] = Field(
-        None, description="Distance from camera to objects in cm (for calibration)"
-    )
-    view_type: str = Field(
-        default="top",
-        description="View type: 'top' for length/width, 'side' for height",
-    )
-
-    class Config:
-        json_schema_extra = {
-            "example": {
-                "image": "base64_encoded_image_data...",
-                "return_annotated": True,
-                "calibration_distance_cm": 100.0,
-                "view_type": "top",
-            }
-        }
-
-
-class ReferenceType(str, Enum):
-    """Type of reference object for calibration"""
-
-    CREDIT_CARD = "credit_card"
-    A4_PAPER = "a4_paper"
-    CUSTOM = "custom"
-    NONE = "none"
-
-
-class CalibrationRequest(BaseModel):
-    """Request to calibrate measurement system"""
-
-    reference_type: ReferenceType = Field(
-        default=ReferenceType.CREDIT_CARD, description="Type of reference object"
-    )
-    reference_distance_cm: float = Field(
-        default=30.0, description="Distance from camera to reference object"
-    )
-    reference_object_width_cm: Optional[float] = Field(
-        None, description="Custom reference width (only for custom type)"
-    )
-    reference_object_height_cm: Optional[float] = Field(
-        None, description="Custom reference height (only for custom type)"
-    )
-
-    class Config:
-        json_schema_extra = {
-            "example": {
-                "reference_type": "credit_card",
-                "reference_distance_cm": 30.0,
-            }
-        }
-
-
-class CalibrationResponse(BaseModel):
-    """Response from calibration endpoint"""
-
-    success: bool
-    message: str
-    scale_factor: float = Field(..., description="Applied scale factor")
-
-
-# ============== Common Schemas ==============
 
 
 class HealthResponse(BaseModel):
@@ -260,14 +68,9 @@ class HealthResponse(BaseModel):
 
     status: str = Field(..., description="Service status")
     version: str = Field(..., description="API version")
-    models_loaded: bool = Field(
-        default=False, description="Whether ML models are loaded"
-    )
 
     class Config:
-        json_schema_extra = {
-            "example": {"status": "healthy", "version": "2.0.0", "models_loaded": True}
-        }
+        json_schema_extra = {"example": {"status": "healthy", "version": "1.0.0"}}
 
 
 class ErrorResponse(BaseModel):

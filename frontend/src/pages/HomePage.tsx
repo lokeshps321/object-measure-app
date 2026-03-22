@@ -1,591 +1,404 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React from 'react';
 import {
   IonPage,
   IonHeader,
   IonToolbar,
   IonTitle,
   IonContent,
+  IonCard,
+  IonCardContent,
   IonButton,
   IonIcon,
   IonSpinner,
-  IonCard,
-  IonCardContent,
+  IonChip,
+  useIonToast,
 } from '@ionic/react';
 import {
   camera,
+  images,
+  refreshOutline,
   checkmarkCircle,
   alertCircle,
-  refreshOutline,
-  cubeOutline,
-  squareOutline,
-  flash,
-  flashOff,
+  resizeOutline,
+  scanOutline,
 } from 'ionicons/icons';
-import { CameraPreview, CameraPreviewOptions } from '@capacitor-community/camera-preview';
-import {
-  measureRealtime,
-  RealtimeMeasurementResponse,
-  MeasuredObject3D,
-  checkHealth,
-} from '../services/api';
-
-type MeasureMode = '2d' | '3d';
-type CaptureStep = 'idle' | 'top' | 'side' | 'done';
+import { useState, useCallback, useEffect } from 'react';
+import { capturePhoto, pickFromGallery, requestCameraPermission } from '../services/camera';
+import { measureImage, MeasurementResponse, MeasuredObject } from '../services/api';
 
 const HomePage: React.FC = () => {
-  // State
-  const [mode, setMode] = useState<MeasureMode>('2d');
-  const [step, setStep] = useState<CaptureStep>('idle');
-  const [isProcessing, setIsProcessing] = useState(false);
-  const [isCameraActive, setIsCameraActive] = useState(false);
-  const [apiReady, setApiReady] = useState(false);
-  const [isFlashOn, setIsFlashOn] = useState(false);
-  
-  // Measurement results
-  const [topViewResult, setTopViewResult] = useState<RealtimeMeasurementResponse | null>(null);
-  const [_sideViewResult, setSideViewResult] = useState<RealtimeMeasurementResponse | null>(null);
-  void _sideViewResult; // Used for future reference
-  const [finalMeasurements, setFinalMeasurements] = useState<MeasuredObject3D[]>([]);
-  const [annotatedImage, setAnnotatedImage] = useState<string | null>(null);
+  const [isLoading, setIsLoading] = useState(false);
+  const [loadingText, setLoadingText] = useState('Processing...');
+  const [capturedImage, setCapturedImage] = useState<string | null>(null);
+  const [resultImage, setResultImage] = useState<string | null>(null);
+  const [measurements, setMeasurements] = useState<MeasuredObject[]>([]);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   
-  const cameraRef = useRef<boolean>(false);
+  const [presentToast] = useIonToast();
 
-  // Check API on mount
+  // Request camera permission on mount
   useEffect(() => {
-    checkHealth().then(setApiReady);
-    return () => { stopCamera(); };
+    requestCameraPermission();
   }, []);
 
-  const startCamera = async () => {
-    if (cameraRef.current) return;
-    
-    try {
-      const options: CameraPreviewOptions = {
-        position: 'rear',
-        parent: 'cameraPreview',
-        className: 'cameraPreview',
-        toBack: false,
-        width: window.innerWidth,
-        height: window.innerHeight * 0.6,
-        enableZoom: true,
-        enableHighResolution: true,
-        disableAudio: true,
-      };
-      
-      await CameraPreview.start(options);
-      cameraRef.current = true;
-      setIsCameraActive(true);
-    } catch (error) {
-      console.error('Camera error:', error);
-      setErrorMessage('Failed to start camera. Check permissions.');
-    }
-  };
+  const showToast = useCallback((message: string, color: 'success' | 'danger' | 'warning' = 'success') => {
+    presentToast({
+      message,
+      duration: 3000,
+      color,
+      position: 'bottom',
+    });
+  }, [presentToast]);
 
-  const stopCamera = async () => {
-    if (!cameraRef.current) return;
-    try {
-      await CameraPreview.stop();
-    } catch (e) {
-      console.log('Stop error:', e);
-    }
-    cameraRef.current = false;
-    setIsCameraActive(false);
-    setIsFlashOn(false); // Reset flash when camera stops
-  };
-
-  const toggleFlash = async () => {
-    if (!cameraRef.current) return;
-    try {
-      const mode = isFlashOn ? 'off' : 'torch';
-      await CameraPreview.setFlashMode({ flashMode: mode });
-      setIsFlashOn(!isFlashOn);
-    } catch (error) {
-      console.error('Flash error:', error);
-    }
-  };
-
-  const captureAndMeasure = async (viewType: 'top' | 'side') => {
-    setIsProcessing(true);
+  const processImage = useCallback(async (base64String: string, dataUrl: string) => {
+    setIsLoading(true);
+    setLoadingText('Detecting A4 paper...');
     setErrorMessage(null);
-    
+    setCapturedImage(dataUrl);
+    setResultImage(null);
+    setMeasurements([]);
+
     try {
-      const result = await CameraPreview.capture({ quality: 90 });
-      
-      if (!result.value) {
-        throw new Error('Failed to capture image');
-      }
-      
-      const response = await measureRealtime(result.value, {
-        returnAnnotated: true,
-        viewType: viewType,
-      });
-      
-      if (viewType === 'top') {
-        setTopViewResult(response);
-        
-        if (mode === '2d') {
-          // 2D mode - done after top view
-          await stopCamera();
-          setFinalMeasurements(response.objects);
-          if (response.annotated_image) {
-            setAnnotatedImage(`data:image/jpeg;base64,${response.annotated_image}`);
-          }
-          setStep('done');
-        } else {
-          // 3D mode - need side view
-          setStep('side');
+      setLoadingText('Measuring objects...');
+      const result: MeasurementResponse = await measureImage(base64String);
+
+      if (result.success) {
+        setMeasurements(result.objects);
+        if (result.processed_image) {
+          setResultImage(`data:image/jpeg;base64,${result.processed_image}`);
         }
+        showToast(`Found ${result.objects.length} object(s)`, 'success');
       } else {
-        // Side view captured
-        setSideViewResult(response);
-        await stopCamera();
-        
-        // Combine top and side measurements
-        if (topViewResult?.objects) {
-          const combined = topViewResult.objects.map((obj, i) => {
-            const sideObj = response.objects[i] || response.objects[0];
-            return {
-              ...obj,
-              height_cm: sideObj?.height_cm || null,
-              object_type: sideObj?.height_cm ? '3D' as const : obj.object_type,
-            };
-          });
-          setFinalMeasurements(combined as MeasuredObject3D[]);
-        }
-        
-        if (response.annotated_image) {
-          setAnnotatedImage(`data:image/jpeg;base64,${response.annotated_image}`);
-        }
-        setStep('done');
+        setErrorMessage(result.message);
+        showToast(result.message, 'warning');
       }
-      
     } catch (error) {
-      const msg = error instanceof Error ? error.message : 'Measurement failed';
-      setErrorMessage(msg);
+      const message = error instanceof Error ? error.message : 'Failed to process image';
+      setErrorMessage(message);
+      showToast(message, 'danger');
     } finally {
-      setIsProcessing(false);
+      setIsLoading(false);
     }
-  };
+  }, [showToast]);
 
-  const startMeasurement = async (selectedMode: MeasureMode) => {
-    setMode(selectedMode);
-    setStep('top');
-    setTopViewResult(null);
-    setSideViewResult(null);
-    setFinalMeasurements([]);
-    setAnnotatedImage(null);
+  const handleCapturePhoto = useCallback(async () => {
+    try {
+      const image = await capturePhoto();
+      await processImage(image.base64String, image.dataUrl);
+    } catch (error: unknown) {
+      const err = error as Error;
+      if (err.message && (err.message.includes('cancelled') || err.message.includes('cancel'))) {
+        return;
+      }
+      console.error('Camera error:', error);
+      showToast(err.message || 'Failed to capture photo', 'danger');
+    }
+  }, [processImage, showToast]);
+
+  const handlePickFromGallery = useCallback(async () => {
+    try {
+      const image = await pickFromGallery();
+      await processImage(image.base64String, image.dataUrl);
+    } catch (error: unknown) {
+      const err = error as Error;
+      if (err.message && (err.message.includes('cancelled') || err.message.includes('cancel'))) {
+        return;
+      }
+      console.error('Gallery error:', error);
+      showToast(err.message || 'Failed to load image', 'danger');
+    }
+  }, [processImage, showToast]);
+
+  const handleReset = useCallback(() => {
+    setCapturedImage(null);
+    setResultImage(null);
+    setMeasurements([]);
     setErrorMessage(null);
-    await startCamera();
-  };
+  }, []);
 
-  const reset = async () => {
-    await stopCamera();
-    setStep('idle');
-    setMode('2d');
-    setTopViewResult(null);
-    setSideViewResult(null);
-    setFinalMeasurements([]);
-    setAnnotatedImage(null);
-    setErrorMessage(null);
-  };
-
-  // Render idle/home screen
-  const renderHome = () => (
-    <div style={{ padding: '20px', textAlign: 'center' }}>
+  // Landing screen
+  const renderLandingScreen = () => (
+    <div style={{
+      display: 'flex',
+      flexDirection: 'column',
+      minHeight: '100%',
+      padding: '20px',
+      background: '#f5f7fb',
+    }}>
+      {/* Hero Section */}
       <div style={{
-        width: '80px',
-        height: '80px',
-        margin: '40px auto 20px',
-        borderRadius: '20px',
-        background: 'linear-gradient(135deg, #3b82f6, #1d4ed8)',
+        flex: 1,
         display: 'flex',
+        flexDirection: 'column',
         alignItems: 'center',
         justifyContent: 'center',
-      }}>
-        <IonIcon icon={cubeOutline} style={{ fontSize: '40px', color: 'white' }} />
-      </div>
-      
-      <h1 style={{ fontSize: '24px', margin: '0 0 10px', color: '#1e293b' }}>
-        Object Measure
-      </h1>
-      <p style={{ color: '#64748b', marginBottom: '30px' }}>
-        Accurate measurements using A4 paper
-      </p>
-      
-      {/* API Status */}
-      <div style={{
-        display: 'inline-flex',
-        alignItems: 'center',
-        gap: '8px',
-        padding: '8px 16px',
-        background: apiReady ? '#dcfce7' : '#fee2e2',
-        borderRadius: '20px',
-        marginBottom: '30px',
+        textAlign: 'center',
+        padding: '40px 20px',
       }}>
         <div style={{
-          width: '8px',
-          height: '8px',
-          borderRadius: '50%',
-          background: apiReady ? '#22c55e' : '#ef4444',
-        }} />
-        <span style={{ color: apiReady ? '#166534' : '#991b1b', fontSize: '14px' }}>
-          {apiReady ? 'Ready' : 'Connecting...'}
-        </span>
-      </div>
-      
-      {/* Instructions */}
-      <div style={{
-        background: '#f8fafc',
-        borderRadius: '16px',
-        padding: '20px',
-        marginBottom: '24px',
-        textAlign: 'left',
-      }}>
-        <h3 style={{ margin: '0 0 12px', fontSize: '16px', color: '#334155' }}>
-          How to measure:
-        </h3>
-        <ol style={{ margin: 0, paddingLeft: '20px', color: '#64748b', lineHeight: '1.8' }}>
-          <li>Place A4 paper on flat surface</li>
-          <li>Put object ON the A4 paper</li>
-          <li>Choose 2D or 3D measurement</li>
-          <li>Follow camera instructions</li>
-        </ol>
-      </div>
-      
-      {/* Mode Selection Buttons */}
-      <div style={{ display: 'flex', gap: '12px', marginBottom: '20px' }}>
-        <IonButton
-          expand="block"
-          style={{ flex: 1 }}
-          disabled={!apiReady}
-          onClick={() => startMeasurement('2d')}
-        >
-          <IonIcon slot="start" icon={squareOutline} />
-          2D (L × W)
-        </IonButton>
-        
-        <IonButton
-          expand="block"
-          style={{ flex: 1 }}
-          color="success"
-          disabled={!apiReady}
-          onClick={() => startMeasurement('3d')}
-        >
-          <IonIcon slot="start" icon={cubeOutline} />
-          3D (L × W × H)
-        </IonButton>
-      </div>
-      
-      <p style={{ fontSize: '12px', color: '#94a3b8' }}>
-        3D mode requires two photos: top view + side view
-      </p>
-    </div>
-  );
-
-  // Render camera view for capturing
-  const renderCapture = () => (
-    <div style={{ height: '100%', display: 'flex', flexDirection: 'column', background: '#000' }}>
-      {/* Camera Preview */}
-      <div 
-        id="cameraPreview" 
-        style={{ 
-          flex: 1, 
-          position: 'relative',
-          minHeight: '60%',
-          background: '#111',
-        }} 
-      >
-        {/* Flash Toggle Button */}
-        <div style={{
-          position: 'absolute',
-          top: '20px',
-          right: '20px',
-          zIndex: 1000,
-        }}>
-          <IonButton
-            fill="clear"
-            style={{
-              '--background': 'rgba(0,0,0,0.5)',
-              '--border-radius': '50%',
-              width: '48px',
-              height: '48px',
-              color: isFlashOn ? '#facc15' : 'white',
-            }}
-            onClick={toggleFlash}
-          >
-            <IonIcon icon={isFlashOn ? flash : flashOff} style={{ fontSize: '24px' }} />
-          </IonButton>
-        </div>
-      </div>
-      
-      {/* Instructions Panel */}
-      <div style={{
-        background: 'linear-gradient(transparent, rgba(0,0,0,0.9))',
-        padding: '20px',
-        color: 'white',
-      }}>
-        {/* Step Indicator */}
-        <div style={{
-          display: 'flex',
-          justifyContent: 'center',
-          gap: '10px',
-          marginBottom: '16px',
-        }}>
-          <div style={{
-            padding: '6px 16px',
-            borderRadius: '20px',
-            background: step === 'top' ? '#3b82f6' : '#374151',
-            fontSize: '14px',
-          }}>
-            1. Top View
-          </div>
-          {mode === '3d' && (
-            <div style={{
-              padding: '6px 16px',
-              borderRadius: '20px',
-              background: step === 'side' ? '#22c55e' : '#374151',
-              fontSize: '14px',
-            }}>
-              2. Side View
-            </div>
-          )}
-        </div>
-        
-        {/* Instructions */}
-        <div style={{ textAlign: 'center', marginBottom: '16px' }}>
-          {step === 'top' && (
-            <>
-              <h3 style={{ margin: '0 0 8px', fontSize: '18px' }}>
-                Top View - Look Down
-              </h3>
-              <p style={{ margin: 0, opacity: 0.8, fontSize: '14px' }}>
-                Hold phone ~30cm above, pointing straight down at the A4 paper
-              </p>
-            </>
-          )}
-          {step === 'side' && (
-            <>
-              <h3 style={{ margin: '0 0 8px', fontSize: '18px' }}>
-                Side View - Look Horizontal
-              </h3>
-              <p style={{ margin: 0, opacity: 0.8, fontSize: '14px' }}>
-                Now capture from the side to measure height
-              </p>
-            </>
-          )}
-        </div>
-        
-        {/* Capture Button */}
-        <div style={{ display: 'flex', justifyContent: 'center', gap: '16px' }}>
-          <IonButton
-            size="large"
-            shape="round"
-            disabled={isProcessing || !isCameraActive}
-            onClick={() => captureAndMeasure(step === 'top' ? 'top' : 'side')}
-            style={{
-              '--padding-start': '32px',
-              '--padding-end': '32px',
-            }}
-          >
-            {isProcessing ? (
-              <IonSpinner name="crescent" />
-            ) : (
-              <>
-                <IonIcon slot="start" icon={camera} />
-                Capture {step === 'top' ? 'Top' : 'Side'}
-              </>
-            )}
-          </IonButton>
-          
-          <IonButton
-            size="large"
-            shape="round"
-            color="medium"
-            onClick={reset}
-          >
-            Cancel
-          </IonButton>
-        </div>
-        
-        {/* Error Message */}
-        {errorMessage && (
-          <div style={{
-            marginTop: '12px',
-            padding: '10px',
-            background: 'rgba(239, 68, 68, 0.2)',
-            borderRadius: '8px',
-            textAlign: 'center',
-            color: '#fca5a5',
-          }}>
-            {errorMessage}
-          </div>
-        )}
-      </div>
-    </div>
-  );
-
-  // Render results
-  const renderResults = () => (
-    <div style={{ padding: '16px' }}>
-      {/* Result Image */}
-      {annotatedImage && (
-        <IonCard style={{ margin: '0 0 16px', borderRadius: '16px', overflow: 'hidden' }}>
-          <img src={annotatedImage} alt="Measured" style={{ width: '100%', display: 'block' }} />
-        </IonCard>
-      )}
-      
-      {/* Calibration Status */}
-      {topViewResult?.calibration_info && (
-        <div style={{
+          width: '120px',
+          height: '120px',
+          borderRadius: '30px',
+          background: '#ffffff',
+          border: '1px solid #e5e7eb',
           display: 'flex',
           alignItems: 'center',
-          gap: '8px',
-          padding: '12px',
-          background: topViewResult.calibration_info.reference_detected ? '#dcfce7' : '#fef3c7',
-          borderRadius: '12px',
-          marginBottom: '16px',
+          justifyContent: 'center',
+          marginBottom: '30px',
+          boxShadow: '0 10px 30px rgba(15, 23, 42, 0.08)',
         }}>
-          <IonIcon 
-            icon={topViewResult.calibration_info.reference_detected ? checkmarkCircle : alertCircle}
-            style={{ 
-              fontSize: '20px', 
-              color: topViewResult.calibration_info.reference_detected ? '#22c55e' : '#f59e0b',
-            }}
-          />
-          <span style={{ 
-            color: topViewResult.calibration_info.reference_detected ? '#166534' : '#92400e',
-            fontSize: '14px',
-          }}>
-            {topViewResult.calibration_info.reference_detected 
-              ? `A4 Detected (${topViewResult.calibration_info.pixels_per_cm.toFixed(1)} px/cm)`
-              : 'A4 paper not detected - measurements may be inaccurate'}
-          </span>
+          <IonIcon icon={resizeOutline} style={{ fontSize: '60px', color: '#0f172a' }} />
         </div>
+        
+        <h1 style={{
+          color: '#0f172a',
+          fontSize: '32px',
+          fontWeight: '700',
+          margin: '0 0 12px 0',
+        }}>
+          Object Measure
+        </h1>
+        
+        <p style={{
+          color: '#475569',
+          fontSize: '16px',
+          margin: '0 0 40px 0',
+          maxWidth: '280px',
+          lineHeight: '1.5',
+        }}>
+          Measure real objects instantly using your camera and an A4 paper reference
+        </p>
+      </div>
+
+      {/* Instructions Card */}
+      <div style={{
+        background: '#ffffff',
+        borderRadius: '20px',
+        padding: '24px',
+        marginBottom: '24px',
+        border: '1px solid #e5e7eb',
+        boxShadow: '0 10px 30px rgba(15, 23, 42, 0.06)',
+      }}>
+        <h3 style={{ color: '#0f172a', margin: '0 0 16px 0', fontSize: '18px' }}>
+          How it works
+        </h3>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+          {[
+            { num: '1', text: 'Place objects on an A4 paper' },
+            { num: '2', text: 'Take a photo from above' },
+            { num: '3', text: 'Get measurements in cm' },
+          ].map((step) => (
+            <div key={step.num} style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+              <div style={{
+                width: '28px',
+                height: '28px',
+                borderRadius: '50%',
+                background: '#0f172a',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                color: 'white',
+                fontSize: '14px',
+                fontWeight: '600',
+              }}>
+                {step.num}
+              </div>
+                <span style={{ color: '#334155', fontSize: '15px' }}>
+                  {step.text}
+                </span>
+              </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Action Buttons */}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', paddingBottom: '20px' }}>
+        <IonButton
+          expand="block"
+          size="large"
+          onClick={handleCapturePhoto}
+          style={{
+            '--background': '#0f172a',
+            '--color': '#ffffff',
+            '--border-radius': '16px',
+            '--box-shadow': '0 10px 24px rgba(15, 23, 42, 0.15)',
+            height: '56px',
+            fontSize: '17px',
+            fontWeight: '600',
+          }}
+        >
+          <IonIcon slot="start" icon={camera} />
+          Take Photo
+        </IonButton>
+        
+        <IonButton
+          expand="block"
+          size="large"
+          fill="outline"
+          onClick={handlePickFromGallery}
+          style={{
+            '--border-radius': '16px',
+            '--border-color': '#cbd5e1',
+            '--color': '#0f172a',
+            height: '56px',
+            fontSize: '17px',
+            fontWeight: '600',
+          }}
+        >
+          <IonIcon slot="start" icon={images} />
+          Choose from Gallery
+        </IonButton>
+      </div>
+    </div>
+  );
+
+  // Results screen
+  const renderResults = () => (
+    <div style={{ padding: '16px', background: '#f5f7fb', minHeight: '100%' }}>
+      {/* Result Image */}
+      {resultImage && (
+        <IonCard style={{
+          margin: '0 0 16px 0',
+          borderRadius: '20px',
+          overflow: 'hidden',
+          background: '#ffffff',
+          border: '1px solid #e5e7eb',
+        }}>
+          <img 
+            src={resultImage} 
+            alt="Measurement result" 
+            style={{ width: '100%', display: 'block' }}
+          />
+        </IonCard>
       )}
-      
-      {/* Measurements */}
-      {finalMeasurements.length > 0 ? (
-        <IonCard style={{ margin: '0 0 16px', borderRadius: '16px' }}>
+
+      {/* Measurements List */}
+      {measurements.length > 0 && (
+        <IonCard style={{
+          margin: '0 0 16px 0',
+          borderRadius: '20px',
+          background: '#ffffff',
+          border: '1px solid #e5e7eb',
+        }}>
           <IonCardContent>
-            <h2 style={{ 
-              display: 'flex', 
-              alignItems: 'center', 
-              gap: '8px',
-              margin: '0 0 16px',
-              color: '#1e293b',
+            <div style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '10px',
+              marginBottom: '20px',
             }}>
-              <IonIcon icon={checkmarkCircle} style={{ color: '#22c55e' }} />
-              {finalMeasurements.length} Object(s) Measured
-            </h2>
+              <IonIcon icon={checkmarkCircle} style={{ color: '#16a34a', fontSize: '24px' }} />
+              <h2 style={{ margin: 0, color: '#0f172a', fontSize: '20px' }}>
+                Measurements
+              </h2>
+            </div>
             
-            {finalMeasurements.map((obj, idx) => (
+            {measurements.map((obj, index) => (
               <div
-                key={idx}
+                key={index}
                 style={{
-                  background: obj.object_type === '3D' 
-                    ? 'linear-gradient(135deg, #22c55e, #16a34a)'
-                    : 'linear-gradient(135deg, #3b82f6, #1d4ed8)',
-                  borderRadius: '12px',
+                  background: '#f8fafc',
+                  borderRadius: '16px',
                   padding: '16px',
-                  marginBottom: '12px',
-                  color: 'white',
+                  marginBottom: index < measurements.length - 1 ? '12px' : 0,
+                  border: '1px solid #e2e8f0',
                 }}
               >
-                <div style={{ 
-                  display: 'flex', 
-                  justifyContent: 'space-between', 
-                  alignItems: 'center',
+                <IonChip style={{
+                  '--background': '#0f172a',
+                  '--color': 'white',
                   marginBottom: '12px',
                 }}>
-                  <span style={{ fontWeight: '600', fontSize: '16px' }}>
-                    <IonIcon 
-                      icon={obj.object_type === '3D' ? cubeOutline : squareOutline} 
-                      style={{ marginRight: '8px' }}
-                    />
-                    {obj.label}
-                  </span>
-                  <span style={{ 
-                    background: 'rgba(255,255,255,0.2)', 
-                    padding: '4px 12px',
-                    borderRadius: '12px',
-                    fontSize: '12px',
-                  }}>
-                    {obj.object_type}
-                  </span>
-                </div>
+                  Object {index + 1}
+                </IonChip>
                 
-                <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
-                  <div style={{ 
-                    flex: 1, 
-                    minWidth: '80px',
-                    background: 'rgba(255,255,255,0.15)',
-                    borderRadius: '10px',
-                    padding: '12px',
-                    textAlign: 'center',
-                  }}>
-                    <div style={{ fontSize: '24px', fontWeight: '700' }}>{obj.length_cm}</div>
-                    <div style={{ fontSize: '12px', opacity: 0.9 }}>Length (cm)</div>
-                  </div>
-                  <div style={{ 
-                    flex: 1, 
-                    minWidth: '80px',
-                    background: 'rgba(255,255,255,0.15)',
-                    borderRadius: '10px',
-                    padding: '12px',
-                    textAlign: 'center',
-                  }}>
-                    <div style={{ fontSize: '24px', fontWeight: '700' }}>{obj.width_cm}</div>
-                    <div style={{ fontSize: '12px', opacity: 0.9 }}>Width (cm)</div>
-                  </div>
-                  {obj.height_cm !== null && (
-                    <div style={{ 
-                      flex: 1, 
-                      minWidth: '80px',
-                      background: 'rgba(255,255,255,0.15)',
-                      borderRadius: '10px',
-                      padding: '12px',
-                      textAlign: 'center',
+                <div style={{ display: 'flex', gap: '20px' }}>
+                  <div style={{ flex: 1, textAlign: 'center' }}>
+                    <div style={{
+                      fontSize: '32px',
+                      fontWeight: '700',
+                      color: '#0f172a',
                     }}>
-                      <div style={{ fontSize: '24px', fontWeight: '700' }}>{obj.height_cm}</div>
-                      <div style={{ fontSize: '12px', opacity: 0.9 }}>Height (cm)</div>
+                      {obj.width_cm}
                     </div>
-                  )}
+                    <div style={{ color: '#64748b', fontSize: '13px' }}>
+                      Width (cm)
+                    </div>
+                  </div>
+                  <div style={{
+                    width: '1px',
+                    background: 'rgba(255,255,255,0.1)',
+                  }} />
+                  <div style={{ flex: 1, textAlign: 'center' }}>
+                    <div style={{
+                      fontSize: '32px',
+                      fontWeight: '700',
+                      color: '#0f172a',
+                    }}>
+                      {obj.height_cm}
+                    </div>
+                    <div style={{ color: '#64748b', fontSize: '13px' }}>
+                      Height (cm)
+                    </div>
+                  </div>
                 </div>
               </div>
             ))}
           </IonCardContent>
         </IonCard>
-      ) : (
-        <IonCard style={{ margin: '0 0 16px', borderRadius: '16px' }}>
+      )}
+
+      {/* Error Message */}
+      {errorMessage && !measurements.length && (
+        <IonCard style={{
+          margin: '0 0 16px 0',
+          borderRadius: '20px',
+          background: '#fff1f2',
+          border: '1px solid #fecdd3',
+        }}>
           <IonCardContent>
-            <div style={{ 
-              display: 'flex', 
-              alignItems: 'center', 
-              gap: '12px',
-              color: '#ef4444',
-            }}>
-              <IonIcon icon={alertCircle} style={{ fontSize: '28px' }} />
+            <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+              <IonIcon icon={alertCircle} style={{ fontSize: '32px', color: '#dc2626' }} />
               <div>
-                <h3 style={{ margin: '0 0 4px' }}>No Objects Detected</h3>
-                <p style={{ margin: 0, fontSize: '14px', color: '#64748b' }}>
-                  Make sure the object is placed on the A4 paper and clearly visible
-                </p>
+                <h3 style={{ margin: '0 0 4px 0', color: '#0f172a' }}>Detection Failed</h3>
+                <p style={{ margin: 0, color: '#475569' }}>{errorMessage}</p>
               </div>
             </div>
           </IonCardContent>
         </IonCard>
       )}
-      
+
       {/* Action Buttons */}
-      <div style={{ display: 'flex', gap: '12px' }}>
-        <IonButton expand="block" style={{ flex: 1 }} onClick={() => startMeasurement(mode)}>
-          <IonIcon slot="start" icon={camera} />
-          Measure Again
-        </IonButton>
-        <IonButton expand="block" style={{ flex: 1 }} fill="outline" onClick={reset}>
+      <div style={{ display: 'flex', gap: '12px', marginTop: '8px' }}>
+        <IonButton
+          expand="block"
+          onClick={handleReset}
+          fill="outline"
+          style={{
+            flex: 1,
+            '--border-radius': '14px',
+            '--border-color': '#cbd5e1',
+            '--color': '#0f172a',
+            height: '50px',
+          }}
+        >
           <IonIcon slot="start" icon={refreshOutline} />
-          New
+          Reset
+        </IonButton>
+        
+        <IonButton
+          expand="block"
+          onClick={handleCapturePhoto}
+          style={{
+            flex: 2,
+            '--background': '#0f172a',
+            '--color': '#ffffff',
+            '--border-radius': '14px',
+            height: '50px',
+          }}
+        >
+          <IonIcon slot="start" icon={camera} />
+          New Photo
         </IonButton>
       </div>
     </div>
@@ -594,25 +407,43 @@ const HomePage: React.FC = () => {
   return (
     <IonPage>
       <IonHeader>
-        <IonToolbar style={{ 
-          '--background': step === 'idle' || step === 'done' ? '#ffffff' : '#000000',
-          '--color': step === 'idle' || step === 'done' ? '#1e293b' : '#ffffff',
+        <IonToolbar style={{
+          '--background': '#ffffff',
+          '--color': '#0f172a',
+          '--border-color': '#e5e7eb',
         }}>
           <IonTitle>
-            {step === 'idle' && 'Object Measure'}
-            {step === 'top' && '1. Top View'}
-            {step === 'side' && '2. Side View'}
-            {step === 'done' && 'Results'}
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <IonIcon icon={scanOutline} />
+              Object Measure
+            </div>
           </IonTitle>
         </IonToolbar>
       </IonHeader>
 
-      <IonContent fullscreen style={{ 
-        '--background': step === 'idle' || step === 'done' ? '#f8fafc' : '#000000',
-      }}>
-        {step === 'idle' && renderHome()}
-        {(step === 'top' || step === 'side') && renderCapture()}
-        {step === 'done' && renderResults()}
+      <IonContent fullscreen style={{ '--background': '#f5f7fb' }}>
+        {/* Loading Overlay */}
+        {isLoading && (
+          <div style={{
+            position: 'fixed',
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            background: 'rgba(0, 0, 0, 0.85)',
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            justifyContent: 'center',
+            zIndex: 9999,
+          }}>
+            <IonSpinner name="crescent" style={{ width: '60px', height: '60px', color: '#0f172a' }} />
+            <p style={{ color: 'white', marginTop: '20px', fontSize: '16px' }}>{loadingText}</p>
+          </div>
+        )}
+
+        {/* Main Content */}
+        {!capturedImage && !resultImage ? renderLandingScreen() : renderResults()}
       </IonContent>
     </IonPage>
   );
