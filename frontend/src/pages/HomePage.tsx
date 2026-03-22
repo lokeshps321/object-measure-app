@@ -18,6 +18,8 @@ import {
   refreshOutline,
   cubeOutline,
   squareOutline,
+  flash,
+  flashOff,
 } from 'ionicons/icons';
 import { CameraPreview, CameraPreviewOptions } from '@capacitor-community/camera-preview';
 import {
@@ -37,6 +39,7 @@ const HomePage: React.FC = () => {
   const [isProcessing, setIsProcessing] = useState(false);
   const [isCameraActive, setIsCameraActive] = useState(false);
   const [apiReady, setApiReady] = useState(false);
+  const [isFlashOn, setIsFlashOn] = useState(false);
   
   // Measurement results
   const [topViewResult, setTopViewResult] = useState<RealtimeMeasurementResponse | null>(null);
@@ -88,6 +91,18 @@ const HomePage: React.FC = () => {
     }
     cameraRef.current = false;
     setIsCameraActive(false);
+    setIsFlashOn(false); // Reset flash when camera stops
+  };
+
+  const toggleFlash = async () => {
+    if (!cameraRef.current) return;
+    try {
+      const mode = isFlashOn ? 'off' : 'torch';
+      await CameraPreview.setFlashMode({ flashMode: mode });
+      setIsFlashOn(!isFlashOn);
+    } catch (error) {
+      console.error('Flash error:', error);
+    }
   };
 
   const captureAndMeasure = async (viewType: 'top' | 'side') => {
@@ -276,10 +291,33 @@ const HomePage: React.FC = () => {
         id="cameraPreview" 
         style={{ 
           flex: 1, 
+          position: 'relative',
           minHeight: '60%',
           background: '#111',
         }} 
-      />
+      >
+        {/* Flash Toggle Button */}
+        <div style={{
+          position: 'absolute',
+          top: '20px',
+          right: '20px',
+          zIndex: 1000,
+        }}>
+          <IonButton
+            fill="clear"
+            style={{
+              '--background': 'rgba(0,0,0,0.5)',
+              '--border-radius': '50%',
+              width: '48px',
+              height: '48px',
+              color: isFlashOn ? '#facc15' : 'white',
+            }}
+            onClick={toggleFlash}
+          >
+            <IonIcon icon={isFlashOn ? flash : flashOff} style={{ fontSize: '24px' }} />
+          </IonButton>
+        </div>
+      </div>
       
       {/* Instructions Panel */}
       <div style={{
