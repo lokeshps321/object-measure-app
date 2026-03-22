@@ -1,7 +1,7 @@
 """
 Image Processing Utilities for Object Size Measurement
-Uses Google Gemini Vision AI for intelligent object detection and measurement
-Falls back to local OpenCV processing if Gemini is unavailable
+Uses HuggingFace Space AI model for depth estimation + measurement
+Falls back to local OpenCV processing if HF Space is unavailable
 """
 
 import cv2
@@ -9,17 +9,15 @@ import numpy as np
 from typing import Tuple, List, Optional
 from dataclasses import dataclass
 import base64
+import httpx
 import json
 import logging
-import os
-from google import genai
-from google.genai import types
+import time
 
 logger = logging.getLogger(__name__)
 
-# Gemini API Key (Paid tier)
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "AIzaSyDFVQ695dMWg-uGa6D6a7IDrVn5MVJ-YQk")
-GEMINI_MODEL = "gemini-2.5-flash"
+# HuggingFace Space API URL
+HF_SPACE_URL = "https://loke007-object-measure-ai.hf.space"
 
 @dataclass
 class MeasuredObject:
@@ -48,251 +46,110 @@ class MeasurementResult:
     calibration_info: Optional[dict] = None
 
 
-def measure_with_gemini(
-    image: np.ndarray,
+def measure_objects_via_hf(
+    image_base64: str,
     mode: str = "2d",
     camera_distance_cm: float = 30.0,
-    side_image: Optional[np.ndarray] = None,
-    side_camera_distance_cm: float = 30.0,
-) -> Optional[MeasurementResult]:
+) -> MeasurementResult:
     """
-    Use Google Gemini Vision AI to detect and measure objects.
+    Measure objects by calling the HuggingFace Space API.
     """
     try:
-        client = genai.Client(api_key=GEMINI_API_KEY)
+        logger.info(f"Calling HF Space for measurement (mode={mode}, dist={camera_distance_cm}cm)")
+        start_time = time.time()
 
-        h, w = image.shape[:2]
-
-        # Encode image to bytes for Gemini
-        _, buffer = cv2.imencode(".jpg", image, [cv2.IMWRITE_JPEG_QUALITY, 85])
-        img_bytes = buffer.tobytes()
-
-        # Build the prompt
-        if mode == "3d":
-            measurement_type = "length_cm, width_cm, and height_cm"
-            mode_instruction = """For 3D mode, estimate the height of each object based on visual cues like shadows, perspective, and object type.
-Return height_cm for each object."""
-        else:
-            measurement_type = "length_cm and width_cm"
-            mode_instruction = "For 2D mode, set height_cm to null."
-
-        prompt = f"""You are an expert computer vision and measurement AI. Analyze this image carefully.
-
-**Camera Setup:**
-- Camera distance from surface: {camera_distance_cm} cm
-- Image resolution: {w}x{h} pixels
-- Camera is pointing straight down at the object(s)
-
-**Your Task:**
-1. Find each distinct physical object in the image (NOT the background, floor, table, or surface)
-2. Draw a TIGHT bounding box around EACH object — the box must hug the object edges precisely, not include surrounding empty space or background
-3. Estimate the real-world size of each object in cm based on the camera distance
-
-{mode_instruction}
-
-**Bounding Box Rules (CRITICAL):**
-- bbox format: [x, y, width, height] in pixels
-- x, y = top-left corner of the box (must be at the object edge, not the image edge)
-- width, height = size of the box (must match the visible object size only)
-- The box must NOT extend to image borders unless the object itself fills the frame
-- Example: if a box occupies pixels 120 to 560 horizontally and 80 to 870 vertically, bbox = [120, 80, 440, 790]
-
-**Measurement Rules:**
-- Camera at {camera_distance_cm}cm distance: use pinhole camera model to estimate real size
-- A phone (~15x7cm) at 30cm fills roughly 35% of a typical camera frame
-- If object fills 80% of the {w}px wide frame at {camera_distance_cm}cm: width ≈ {camera_distance_cm} * 0.8 * ({w}/{w*0.7:.0f}) / 1 cm
-- Round measurements to 1 decimal place
-- Label objects specifically: "Amazon Basics Power Bank", "iPhone 14", "Notebook", "Coffee Mug"
-
-**Return ONLY valid JSON:**
-{{
-  "objects": [
-    {{
-      "label": "Specific Object Name",
-      "confidence": 0.9,
-      "length_cm": 15.4,
-      "width_cm": 10.9,
-      "height_cm": null,
-      "bbox": [x, y, width_px, height_px],
-      "center": [cx, cy]
-    }}
-  ]
-}}
-
-If no objects found: {{"objects": []}}
-Return ONLY the JSON. No markdown. No explanation."""
-
-        # Create the image part for Gemini (new SDK)
-        image_part = types.Part.from_bytes(data=img_bytes, mime_type="image/jpeg")
-
-        response = client.models.generate_content(
-            model=GEMINI_MODEL,
-            contents=[image_part, prompt]
-        )
-        response_text = response.text.strip()
+        # Call Gradio API
+        # Gradio API endpoint format
+        api_url = f"{HF_SPACE_URL}/api/predict"
         
-        # Clean up response - remove markdown code blocks if present
-        if response_text.startswith("```"):
-            lines = response_text.split("\n")
-            lines = [l for l in lines if not l.strip().startswith("```")]
-            response_text = "\n".join(lines)
+        # Prepare the image as data URL
+        if not image_base64.startswith("data:"):
+            img_data_url = f"data:image/jpeg;base64,{image_base64}"
+        else:
+            img_data_url = image_base64
 
-        logger.info(f"Gemini response: {response_text[:200]}")
+        payload = {
+            "data": [
+                img_data_url,  # image
+                mode,          # mode
+                camera_distance_cm,  # distance
+            ]
+        }
 
-        # Parse JSON
-        data = json.loads(response_text)
-        objects_data = data.get("objects", [])
+        with httpx.Client(timeout=120.0) as client:
+            response = client.post(api_url, json=payload)
+            response.raise_for_status()
 
-        # Build measured objects and annotated image
+        result = response.json()
+        elapsed = time.time() - start_time
+        logger.info(f"HF Space responded in {elapsed:.1f}s")
+
+        # Parse result
+        data = result.get("data", [])
+        if len(data) < 2:
+            return MeasurementResult(
+                success=False,
+                message="Invalid response from AI model",
+                objects=[],
+                reference_detected=False,
+            )
+
+        # data[0] = annotated image (base64 data URL or path)
+        # data[1] = JSON string with measurements
+        annotated_img_data = data[0]
+        measurements_json = json.loads(data[1])
+
+        # Extract annotated image base64
+        processed_image = None
+        if annotated_img_data:
+            if isinstance(annotated_img_data, dict) and "url" in annotated_img_data:
+                # Gradio returns a URL - download it
+                img_url = annotated_img_data["url"]
+                if not img_url.startswith("http"):
+                    img_url = f"{HF_SPACE_URL}{img_url}"
+                with httpx.Client(timeout=30.0) as client:
+                    img_resp = client.get(img_url)
+                    processed_image = base64.b64encode(img_resp.content).decode("utf-8")
+            elif isinstance(annotated_img_data, str) and annotated_img_data.startswith("data:"):
+                processed_image = annotated_img_data.split(",", 1)[1]
+
+        # Build measured objects
         measured_objects = []
-        annotated = image.copy()
-
-        for i, obj in enumerate(objects_data):
-            obj_id = i + 1
-            label = obj.get("label", f"Object {obj_id}")
-            confidence = obj.get("confidence", 0.8)
-            length_cm = round(float(obj.get("length_cm", 0)), 1)
-            width_cm = round(float(obj.get("width_cm", 0)), 1)
-            height_cm = obj.get("height_cm")
-            if height_cm is not None:
-                height_cm = round(float(height_cm), 1)
-            
-            # Ensure length >= width
-            if length_cm < width_cm:
-                length_cm, width_cm = width_cm, length_cm
-
-            bbox = obj.get("bbox", [0, 0, 100, 100])
-            if len(bbox) == 4:
-                x, y, bw, bh = int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3])
-            else:
-                x, y, bw, bh = 0, 0, 100, 100
-
-            # Clamp to image bounds
-            x = max(0, min(x, w - 1))
-            y = max(0, min(y, h - 1))
-            bw = max(10, min(bw, w - x))
-            bh = max(10, min(bh, h - y))
-
-            # === REFINE bbox using OpenCV contours for pixel-perfect tight box ===
-            # Add 20px padding to Gemini's rough region before searching for contours
-            pad = 20
-            rx = max(0, x - pad)
-            ry = max(0, y - pad)
-            rx2 = min(w, x + bw + pad)
-            ry2 = min(h, y + bh + pad)
-            roi = image[ry:ry2, rx:rx2]
-
-            if roi.size > 0:
-                roi_gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-                roi_blur = cv2.GaussianBlur(roi_gray, (5, 5), 1)
-
-                # Try Canny edges
-                edges = cv2.Canny(roi_blur, 30, 100)
-                edges = cv2.dilate(edges, np.ones((3, 3), np.uint8), iterations=2)
-                contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-                # Also try Otsu threshold
-                _, otsu = cv2.threshold(roi_blur, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-                otsu = cv2.morphologyEx(otsu, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8), iterations=2)
-                contours2, _ = cv2.findContours(otsu, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                contours = list(contours) + list(contours2)
-
-                # Find the largest contour that makes sense
-                best_contour = None
-                best_area = 0
-                roi_area = roi.shape[0] * roi.shape[1]
-                for cnt in contours:
-                    area = cv2.contourArea(cnt)
-                    if area > roi_area * 0.05 and area < roi_area * 0.99:
-                        if area > best_area:
-                            best_area = area
-                            best_contour = cnt
-
-                if best_contour is not None:
-                    cx_r, cy_r, cw_r, ch_r = cv2.boundingRect(best_contour)
-                    # Convert back to full image coordinates
-                    x = rx + cx_r
-                    y = ry + cy_r
-                    bw = cw_r
-                    bh = ch_r
-            # === END REFINE ===
-
-            center = obj.get("center", [x + bw // 2, y + bh // 2])
-            cx, cy = x + bw // 2, y + bh // 2
-
-            obj_type = "3D" if height_cm else "2D"
-            color = (0, 255, 0) if obj_type == "3D" else (255, 165, 0)
-            bg_color = (0, 160, 0) if obj_type == "3D" else (200, 130, 0)
-
-            # Draw bounding box
-            cv2.rectangle(annotated, (x, y), (x + bw, y + bh), color, 2)
-
-            # Draw label
-            lbl = f"{obj_type}: {label}"
-            if height_cm:
-                dims = f"L:{length_cm} W:{width_cm} H:{height_cm} cm"
-            else:
-                dims = f"L:{length_cm} x W:{width_cm} cm"
-
-            font = cv2.FONT_HERSHEY_SIMPLEX
-            (tw, th_), _ = cv2.getTextSize(lbl, font, 0.55, 2)
-            cv2.rectangle(annotated, (x, y - th_ - 10), (x + tw + 8, y), bg_color, -1)
-            cv2.putText(annotated, lbl, (x + 4, y - 5), font, 0.55, (255, 255, 255), 2)
-
-            (dw, dh), _ = cv2.getTextSize(dims, font, 0.55, 2)
-            cv2.rectangle(annotated, (x, y + bh), (x + dw + 8, y + bh + dh + 10), bg_color, -1)
-            cv2.putText(annotated, dims, (x + 4, y + bh + dh + 5), font, 0.55, (255, 255, 255), 2)
-
+        for obj in measurements_json.get("objects", []):
             measured_objects.append(
                 MeasuredObject(
-                    object_id=obj_id,
-                    object_type=obj_type,
-                    label=label,
-                    confidence=confidence,
-                    length_cm=length_cm,
-                    width_cm=width_cm,
-                    height_cm=height_cm,
-                    bounding_box=(x, y, bw, bh),
-                    center=(cx, cy),
+                    object_id=obj.get("id", 0),
+                    object_type=obj.get("object_type", "2D"),
+                    label=obj.get("label", "Object"),
+                    confidence=obj.get("confidence", 0.5),
+                    length_cm=obj.get("length_cm", 0),
+                    width_cm=obj.get("width_cm", 0),
+                    height_cm=obj.get("height_cm"),
+                    bounding_box=tuple(obj.get("bbox", (0, 0, 0, 0))),
+                    center=tuple(obj.get("center", (0, 0))),
                 )
             )
 
-        # Status text
-        cv2.putText(annotated, f"Mode: {mode.upper()} | Dist: {camera_distance_cm}cm (Gemini AI)", 
-                    (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-
-        _, out_buffer = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 85])
-        processed_image = base64.b64encode(out_buffer).decode("utf-8")
-
-        # Handle side image for 3D
-        processed_side_image = None
-        if mode == "3d" and side_image is not None:
-            side_annotated = side_image.copy()
-            cv2.putText(side_annotated, f"Side View | Dist: {side_camera_distance_cm}cm", 
-                        (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-            _, side_buffer = cv2.imencode(".jpg", side_annotated, [cv2.IMWRITE_JPEG_QUALITY, 85])
-            processed_side_image = base64.b64encode(side_buffer).decode("utf-8")
-
-        msg = f"Measured {len(measured_objects)} object(s)" if measured_objects else "No objects detected"
-
         return MeasurementResult(
-            success=True,
-            message=msg,
+            success=measurements_json.get("success", True),
+            message=measurements_json.get("message", f"Measured {len(measured_objects)} object(s)"),
             objects=measured_objects,
-            reference_detected=False,
+            reference_detected=True,
             processed_image_base64=processed_image,
-            processed_side_image_base64=processed_side_image,
             mode=mode,
             calibration_info={
-                "method": "gemini_vision_ai",
+                "method": "ai_depth_estimation",
                 "camera_distance_cm": camera_distance_cm,
-                "model": "gemini-2.0-flash",
+                "model": "Depth-Anything-V2",
             },
         )
 
+    except httpx.TimeoutException:
+        logger.warning("HF Space timeout, falling back to local processing")
+        return None  # Signal to use fallback
     except Exception as e:
-        logger.error(f"Gemini error: {e}", exc_info=True)
-        return None  # Fall back to local
+        logger.error(f"HF Space error: {e}")
+        return None  # Signal to use fallback
 
 
 def measure_objects_local(
@@ -339,10 +196,12 @@ def measure_objects_local(
 
         sall_contours = sorted(sall_contours, key=cv2.contourArea, reverse=True)
         
+        # Take the largest contour in side view as the object to measure height
         for contour in sall_contours:
             sarea = cv2.contourArea(contour)
             if sarea > sw * sh * 0.005:
                 sx, sy, sbw, sbh = cv2.boundingRect(contour)
+                # The vertical height of the bounding box represents the physical height 
                 actual_height_cm = round(max(0.3, sbh * scm_per_px), 1)
                 break
 
@@ -355,12 +214,14 @@ def measure_objects_local(
     kernel = np.ones((5, 5), np.uint8)
     all_contours = []
 
+    # Edge detection
     edges = cv2.Canny(blurred, 40, 120)
     edges = cv2.dilate(edges, kernel, iterations=2)
     edges = cv2.erode(edges, kernel, iterations=1)
     c1, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     all_contours.extend(c1)
 
+    # Otsu threshold
     _, otsu = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
     otsu = cv2.morphologyEx(otsu, cv2.MORPH_CLOSE, kernel, iterations=2)
     c2, _ = cv2.findContours(otsu, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -369,7 +230,7 @@ def measure_objects_local(
     all_contours = sorted(all_contours, key=cv2.contourArea, reverse=True)
 
     min_area = w * h * 0.005
-    max_area = w * h * 0.99
+    max_area = w * h * 0.99  # Allow very large objects
     detected_regions = []
     measured_objects = []
     annotated = image.copy()
@@ -381,13 +242,15 @@ def measure_objects_local(
 
         x, y, bw, bh = cv2.boundingRect(contour)
         aspect = max(bw, bh) / max(1, min(bw, bh))
-        if aspect > 15:
+        if aspect > 15:  # more relaxed aspect ratio
             continue
 
+        # More relaxed margin
         margin = 0
         if x < margin or y < margin or x + bw > w - margin or y + bh > h - margin:
             continue
 
+        # Duplicate check
         is_dup = False
         for rx, ry, rw, rh in detected_regions:
             ox = max(0, min(x + bw, rx + rw) - max(x, rx))
@@ -412,11 +275,13 @@ def measure_objects_local(
         if length_cm < width_cm:
             length_cm, width_cm = width_cm, length_cm
 
+        # 3D height assignment
         height_cm = None
         if mode == "3d":
             if actual_height_cm is not None:
                 height_cm = actual_height_cm
             else:
+                # Estimate if side view not provided
                 roi = gray[y:y+bh, x:x+bw]
                 if roi.size > 0:
                     texture_var = np.var(roi)
@@ -467,8 +332,11 @@ def measure_objects_local(
             break
 
     # Status
-    cv2.putText(annotated, f"Mode: {mode.upper()} | Dist: {camera_distance_cm}cm (Local Fallback)", 
+    cv2.putText(annotated, f"Mode: {mode.upper()} | Top Dist: {camera_distance_cm}cm", 
                 (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+    if actual_height_cm:
+        cv2.putText(annotated, f"Side Dist: {side_camera_distance_cm}cm (True 3D)", 
+                    (10, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
 
     _, buffer = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 85])
     processed_image = base64.b64encode(buffer).decode("utf-8")
@@ -481,11 +349,11 @@ def measure_objects_local(
         objects=measured_objects,
         reference_detected=False,
         processed_image_base64=processed_image,
-        processed_side_image_base64=None,
         mode=mode,
         calibration_info={
-            "method": "local_opencv_fallback",
+            "method": "local_opencv_2_views" if actual_height_cm else "local_opencv",
             "camera_distance_cm": camera_distance_cm,
+            "side_camera_distance_cm": side_camera_distance_cm
         },
     )
 
@@ -499,14 +367,7 @@ def measure_objects(
     side_camera_distance_cm: float = 30.0,
 ) -> MeasurementResult:
     """
-    Main measurement function. 
-    Uses Gemini AI first, falls back to local OpenCV if Gemini fails.
+    Main measurement function. Always use local 2-view processing for perfection.
     """
-    # Try Gemini first
-    result = measure_with_gemini(image, mode, camera_distance_cm, side_image, side_camera_distance_cm)
-    if result is not None:
-        return result
-
-    # Fallback to local OpenCV
-    logger.warning("Gemini failed, using local OpenCV fallback")
+    # Overriding HF space completely in favor of robust 2-view OpenCV approach
     return measure_objects_local(image, mode, camera_distance_cm, side_image, side_camera_distance_cm)
