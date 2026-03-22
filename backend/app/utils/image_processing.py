@@ -76,45 +76,51 @@ Return height_cm for each object."""
             measurement_type = "length_cm and width_cm"
             mode_instruction = "For 2D mode, set height_cm to null."
 
-        prompt = f"""You are an expert object measurement AI. Analyze this image and measure all distinct objects visible.
+        prompt = f"""You are an expert computer vision and measurement AI. Analyze this image carefully.
 
 **Camera Setup:**
-- Camera distance from objects: {camera_distance_cm} cm
+- Camera distance from surface: {camera_distance_cm} cm
 - Image resolution: {w}x{h} pixels
-- The camera is pointing at objects from above (bird's eye / top-down view)
+- Camera is pointing straight down at the object(s)
 
 **Your Task:**
-1. Identify each distinct object in the image (ignore the background/table/surface)
-2. Estimate the real-world dimensions ({measurement_type}) of each object in centimeters
-3. Provide the bounding box location of each object in pixels [x, y, width, height]
+1. Find each distinct physical object in the image (NOT the background, floor, table, or surface)
+2. Draw a TIGHT bounding box around EACH object — the box must hug the object edges precisely, not include surrounding empty space or background
+3. Estimate the real-world size of each object in cm based on the camera distance
 
 {mode_instruction}
 
-**Important Rules:**
-- Camera distance of {camera_distance_cm}cm means the camera is {camera_distance_cm}cm away from the object
-- Use the camera distance to calibrate your size estimates
-- Be precise - round to 1 decimal place
-- Common objects: a credit card is 8.5x5.4cm, a phone is ~15x7cm, an A4 sheet is 29.7x21cm
-- If an object is very close (10cm distance), it will appear very large in the frame
-- Label objects descriptively (e.g., "Phone", "Box", "Book", "Cup")
+**Bounding Box Rules (CRITICAL):**
+- bbox format: [x, y, width, height] in pixels
+- x, y = top-left corner of the box (must be at the object edge, not the image edge)
+- width, height = size of the box (must match the visible object size only)
+- The box must NOT extend to image borders unless the object itself fills the frame
+- Example: if a box occupies pixels 120 to 560 horizontally and 80 to 870 vertically, bbox = [120, 80, 440, 790]
 
-**Return ONLY valid JSON in this exact format:**
+**Measurement Rules:**
+- Camera at {camera_distance_cm}cm distance: use pinhole camera model to estimate real size
+- A phone (~15x7cm) at 30cm fills roughly 35% of a typical camera frame
+- If object fills 80% of the {w}px wide frame at {camera_distance_cm}cm: width ≈ {camera_distance_cm} * 0.8 * ({w}/{w*0.7:.0f}) / 1 cm
+- Round measurements to 1 decimal place
+- Label objects specifically: "Amazon Basics Power Bank", "iPhone 14", "Notebook", "Coffee Mug"
+
+**Return ONLY valid JSON:**
 {{
   "objects": [
     {{
-      "label": "Object Name",
-      "confidence": 0.85,
-      "length_cm": 15.2,
-      "width_cm": 7.5,
+      "label": "Specific Object Name",
+      "confidence": 0.9,
+      "length_cm": 15.4,
+      "width_cm": 10.9,
       "height_cm": null,
-      "bbox": [100, 150, 300, 200],
-      "center": [250, 250]
+      "bbox": [x, y, width_px, height_px],
+      "center": [cx, cy]
     }}
   ]
 }}
 
-If no distinct objects are found, return: {{"objects": []}}
-Return ONLY the JSON, no markdown, no explanation."""
+If no objects found: {{"objects": []}}
+Return ONLY the JSON. No markdown. No explanation."""
 
         # Create the image part for Gemini (new SDK)
         image_part = types.Part.from_bytes(data=img_bytes, mime_type="image/jpeg")
