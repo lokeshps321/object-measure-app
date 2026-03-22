@@ -17,7 +17,7 @@ import google.generativeai as genai
 logger = logging.getLogger(__name__)
 
 # Gemini API Key
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "AIzaSyDWy10mNuIfcPT6ilXZghOdLzzZOsKJyNY")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "AIzaSyAsVcu6NemLvN2f76Me2xAQfsMl4Ezttjs")
 
 @dataclass
 class MeasuredObject:
