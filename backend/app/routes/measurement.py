@@ -117,7 +117,6 @@ async def measure_base64(data: MeasurementRequest):
             reference_detected=result.reference_detected,
             objects=measured_objects,
             processed_image=result.processed_image_base64,
-            processed_side_image=getattr(result, 'processed_side_image_base64', None),
             mode=result.mode,
             calibration_info=result.calibration_info,
         )
