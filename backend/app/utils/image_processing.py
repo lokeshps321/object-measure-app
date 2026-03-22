@@ -329,7 +329,7 @@ def measure_objects_local(
 
         # Draw visual dimension lines (L and W)
         box = cv2.boxPoints(rect)
-        box = np.int0(box)
+        box = np.array(box, dtype=np.int64)
         cv2.drawContours(annotated, [box], 0, (255, 255, 255), 1) # Thin white outline
         
         # d1 vs d2 to find length side
