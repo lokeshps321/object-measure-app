@@ -206,13 +206,21 @@ def measure_objects_local(
                 actual_height_cm = round(max(0.3, sbh * scm_per_px), 1)
                 
                 sannotated = side_image.copy()
-                cv2.rectangle(sannotated, (sx, sy), (sx + sbw, sy + sbh), (0, 255, 0), 4)
+                # Draw main rectangle
+                cv2.rectangle(sannotated, (sx, sy), (sx + sbw, sy + sbh), (0, 255, 0), 2)
                 
-                slabel = f"True Height: {actual_height_cm}cm"
+                # Draw distinct vertical line for height
+                line_x = sx + sbw + 15 if sx + sbw + 20 < sw else sx - 15
+                cv2.line(sannotated, (line_x, sy), (line_x, sy + sbh), (0, 255, 0), 3)
+                # End caps for height line
+                cv2.line(sannotated, (line_x - 10, sy), (line_x + 10, sy), (0, 255, 0), 3)
+                cv2.line(sannotated, (line_x - 10, sy + sbh), (line_x + 10, sy + sbh), (0, 255, 0), 3)
+                
+                slabel = f"H: {actual_height_cm}cm"
                 font = cv2.FONT_HERSHEY_SIMPLEX
                 (stw, sth_), _ = cv2.getTextSize(slabel, font, 0.8, 2)
-                cv2.rectangle(sannotated, (sx, sy - sth_ - 15), (sx + stw + 10, sy), (0, 160, 0), -1)
-                cv2.putText(sannotated, slabel, (sx + 5, sy - 7), font, 0.8, (255, 255, 255), 2)
+                cv2.rectangle(sannotated, (line_x - 5, sy + sbh // 2 - 15), (line_x + stw + 15, sy + sbh // 2 + 15), (0, 160, 0), -1)
+                cv2.putText(sannotated, slabel, (line_x + 5, sy + sbh // 2 + 10), font, 0.8, (255, 255, 255), 2)
                 
                 # Encode side image
                 _, sbuffer = cv2.imencode(".jpg", sannotated, [cv2.IMWRITE_JPEG_QUALITY, 85])
@@ -318,6 +326,22 @@ def measure_objects_local(
             dims = f"L:{length_cm} W:{width_cm} H:{height_cm} cm"
         else:
             dims = f"L:{length_cm} x W:{width_cm} cm"
+
+        # Draw visual dimension lines (L and W)
+        box = cv2.boxPoints(rect)
+        box = np.int0(box)
+        cv2.drawContours(annotated, [box], 0, (255, 255, 255), 1) # Thin white outline
+        
+        # d1 vs d2 to find length side
+        d1 = np.linalg.norm(box[0] - box[1])
+        d2 = np.linalg.norm(box[1] - box[2])
+        if d1 > d2:
+            p1, p2, p3, p4 = box[0], box[1], box[1], box[2]
+        else:
+            p1, p2, p3, p4 = box[1], box[2], box[0], box[1]
+            
+        cv2.line(annotated, tuple(p1), tuple(p2), (0, 255, 255), 3) # Length
+        cv2.line(annotated, tuple(p3), tuple(p4), (255, 0, 255), 3) # Width
 
         font = cv2.FONT_HERSHEY_SIMPLEX
         (tw, th_), _ = cv2.getTextSize(label, font, 0.55, 2)
